@@ -23,12 +23,16 @@ from dc_agent.executor.base import (
 logger = logging.getLogger(__name__)
 
 # Platform specific imports for resource limits
+win32api: Any = None
+win32job: Any = None
 HAS_WIN32JOB = False
 if sys.platform == "win32":
     try:
-        import win32api
-        import win32job
+        import win32api as _win32api
+        import win32job as _win32job
 
+        win32api = _win32api
+        win32job = _win32job
         HAS_WIN32JOB = True
     except ImportError:
         HAS_WIN32JOB = False
