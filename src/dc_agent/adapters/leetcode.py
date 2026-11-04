@@ -106,7 +106,7 @@ class LeetCodeAdapter(ILeetCodeAdapter):
             return []
 
         pattern = re.compile(
-            r"<strong>Output:</strong>\s*(?:<code>)?\s*([^<\n\r]+)",
+            r"<strong>Output:</strong>\s*(?:<(?:code|span)[^>]*>)?\s*([^<\n\r]+)",
             re.IGNORECASE,
         )
         matches = pattern.findall(content_html)

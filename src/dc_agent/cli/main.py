@@ -351,6 +351,12 @@ def today() -> None:
             console.print("[yellow]No solution attempts recorded yet.[/yellow]")
 
 
+@app.command(name="show-solution")
+def show_solution() -> None:
+    """View today's problem and generated solution code (alias for 'today')."""
+    today()
+
+
 @leetcode_app.command(name="open-profile")
 def leetcode_open_profile() -> None:
     """Open official LeetCode user profile in default web browser."""
@@ -751,12 +757,31 @@ def submit() -> None:
         latest_attempt = session.attempts[-1] if session.attempts else None
         if latest_attempt:
             # Try to copy to clipboard
+            copied = False
             try:
                 import pyperclip  # type: ignore[import-untyped]
 
                 pyperclip.copy(latest_attempt.source_code)
-                console.print("[green]✔ Solution code copied to clipboard![/green]")
+                copied = True
             except Exception:
+                pass
+
+            if not copied and sys.platform == "win32":
+                try:
+                    import subprocess
+
+                    subprocess.run(
+                        ["clip"],
+                        input=latest_attempt.source_code.encode("utf-8"),
+                        check=True,
+                    )
+                    copied = True
+                except Exception:
+                    pass
+
+            if copied:
+                console.print("[green]✔ Solution code copied to clipboard![/green]")
+            else:
                 console.print(
                     "[yellow]Clipboard utility not available. Solution is in problem workspace.[/yellow]"
                 )
