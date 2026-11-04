@@ -28,6 +28,7 @@ from dc_agent.adapters.base import TestCase
 from dc_agent.adapters.codeforces import CodeforcesAdapter
 from dc_agent.adapters.leetcode import LeetCodeAdapter
 from dc_agent.config import get_canonical_cycle_date, get_settings
+from dc_agent.core.cloud_runner import CloudRunner
 from dc_agent.core.orchestrator import DailyOrchestrator
 from dc_agent.curriculum.engine import CurriculumEngine
 from dc_agent.curriculum.models import TIER_BOUNDS, CurriculumTier, ProgressionState
@@ -89,6 +90,8 @@ def config() -> None:
     table.add_row("Gemini Model", settings.gemini_model)
     table.add_row("Gemini API Key", settings.get_masked_gemini_key())
     table.add_row("LeetCode Handle", settings.leetcode_username)
+    table.add_row("LeetCode Session", settings.get_masked_leetcode_session())
+    table.add_row("LeetCode CSRF Token", settings.get_masked_leetcode_csrf())
     table.add_row("Codeforces Handle", settings.codeforces_username)
     table.add_row("Daily Policy", settings.daily_policy)
     table.add_row("Scheduled Run Time", f"{settings.daily_run_time} ({settings.timezone})")
@@ -318,6 +321,73 @@ def daily(
         raise typer.Exit(code=1) from e
 
 
+@app.command(name="cloud-run")
+def cloud_run(
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Validate execution pipeline and local Docker tests without submitting to LeetCode",
+    ),
+    platform: str = typer.Option(
+        None,
+        "--platform",
+        "-p",
+        help="Target platform override (defaults to leetcode)",
+    ),
+    max_retries: int = typer.Option(
+        3,
+        "--max-retries",
+        help="Maximum platform judge diagnostic retries on Wrong Answer / TLE",
+    ),
+) -> None:
+    """Execute autonomous cloud daily challenge workflow with end-to-end verification."""
+    settings = get_settings()
+    console.print(
+        Panel.fit(
+            f"[bold cyan]⚡ DC-Agent Autonomous Cloud Execution[/bold cyan]\n"
+            f"[bold white]Mode:[/bold white] {'[yellow]Dry Run[/yellow]' if dry_run else '[green]Live Autonomous Submission[/green]'}\n"
+            f"[bold white]Platform:[/bold white] {(platform or 'leetcode').upper()}\n"
+            f"[bold white]Account:[/bold white] {settings.leetcode_username}\n"
+            f"[bold white]Scheduled Run Target:[/bold white] 5:30 PM ({settings.timezone})",
+            title="Cloud Runner Active",
+            border_style="cyan",
+        )
+    )
+
+    runner = CloudRunner(settings=settings)
+    try:
+        res = asyncio.run(
+            runner.execute(
+                dry_run=dry_run,
+                force_platform=platform,
+                max_platform_retries=max_retries,
+            )
+        )
+        status_val = res.get("status")
+        is_done = status_val == "DONE"
+        color = "green" if is_done else ("yellow" if dry_run else "red")
+
+        console.print(
+            Panel.fit(
+                f"[{color} bold]Terminal Status: {status_val}[/{color} bold]\n"
+                f"[bold white]Problem:[/bold white] {res.get('problem_title')}\n"
+                f"[bold white]URL:[/bold white] {res.get('problem_url')}\n"
+                f"[bold white]Submission ID:[/bold white] {res.get('submission_id') or 'N/A'}\n"
+                f"[bold white]Judge Verdict:[/bold white] {res.get('judge_verdict') or 'N/A'}\n"
+                f"[bold white]Calendar Verified:[/bold white] {'[green]Yes (Green Active)[/green]' if res.get('calendar_verified') else '[yellow]Pending / Dry Run[/yellow]'}\n"
+                f"[bold white]Streak:[/bold white] {res.get('streak', 0)} days | [bold white]Total Active:[/bold white] {res.get('total_active_days', 0)} days\n\n"
+                f"[dim]Detailed execution report persisted at: {res.get('report_file', 'reports/cloud/LIVE_CLOUD_E2E_TEST_REPORT.md')}[/dim]",
+                title="Cloud Execution Summary",
+                border_style=color,
+            )
+        )
+        if not is_done and not dry_run:
+            raise typer.Exit(code=1)
+    except Exception as e:
+        console.print(f"[bold red]Cloud Runner Execution Error:[/bold red] {e}")
+        raise typer.Exit(code=1) from e
+
+
 @app.command()
 def today() -> None:
     """View today's problem and generated solution code."""
@@ -421,6 +491,134 @@ def leetcode_set_daily(
     console.print(
         "[dim]Run 'dc-agent solve' or 'dc-agent daily --platform leetcode' to proceed.[/dim]"
     )
+
+
+@leetcode_app.command(name="verify-calendar")
+def leetcode_verify_calendar() -> None:
+    """Verify whether today's canonical date (Asia/Kolkata) is marked active on LeetCode calendar."""
+    settings = get_settings()
+    cycle_date = get_canonical_cycle_date(settings)
+    adapter = LeetCodeAdapter()
+
+    console.print(
+        f"[cyan]Verifying activity calendar for user '[bold white]{settings.leetcode_username}[/bold white]' on date {cycle_date} (Asia/Kolkata)...[/cyan]"
+    )
+    res = asyncio.run(adapter.verify_calendar_activity(settings.leetcode_username, cycle_date))
+
+    if res.is_active:
+        console.print(
+            Panel.fit(
+                f"[bold green]✔ Date {cycle_date} is ACTIVE on LeetCode Calendar![/bold green]\n\n"
+                f"[bold white]Submissions Today:[/bold white] {res.submission_count}\n"
+                f"[bold white]Current Streak:[/bold white] {res.streak} days\n"
+                f"[bold white]Total Active Days:[/bold white] {res.total_active_days} days\n"
+                f"[bold white]Profile URL:[/bold white] {LeetCodeAdapter.get_profile_url(settings.leetcode_username)}",
+                title="Calendar Verification Succeeded",
+                border_style="green",
+            )
+        )
+    else:
+        console.print(
+            Panel.fit(
+                f"[bold yellow]✖ Date {cycle_date} is NOT yet marked active on LeetCode Calendar.[/bold yellow]\n\n"
+                f"[bold white]Submissions Today:[/bold white] 0\n"
+                f"[bold white]Current Streak:[/bold white] {res.streak} days\n"
+                f"[bold white]Total Active Days:[/bold white] {res.total_active_days} days\n"
+                f"[dim]Note: If a submission was just accepted, LeetCode cache may take 10-30 seconds to update.[/dim]",
+                title="Calendar Verification Pending",
+                border_style="yellow",
+            )
+        )
+
+
+@leetcode_app.command(name="submit-daily")
+def leetcode_submit_daily() -> None:
+    """Submit the latest locally verified solution for today's challenge to LeetCode."""
+    settings = get_settings()
+    cycle_date = get_canonical_cycle_date(settings)
+
+    if not settings.leetcode_session:
+        console.print(
+            "[bold red]Error: LEETCODE_SESSION is not configured in .env or environment secrets.[/bold red]"
+        )
+        raise typer.Exit(code=1)
+
+    with get_db() as db:
+        repo = Repository(db)
+        session = repo.get_daily_session_for_date(cycle_date)
+        if not session or not session.attempts:
+            console.print(
+                f"[yellow]No verified solution available for {cycle_date}. Run 'dc-agent daily' first.[/yellow]"
+            )
+            raise typer.Exit(code=1)
+
+        latest = session.attempts[-1]
+        problem = session.problem
+        adapter = LeetCodeAdapter()
+
+        console.print(
+            f"[bold cyan]Submitting solution for {problem.title} (#{problem.internal_question_id})...[/bold cyan]"
+        )
+        session_cookie = settings.leetcode_session.get_secret_value()
+        csrf_token = (
+            settings.leetcode_csrf_token.get_secret_value()
+            if settings.leetcode_csrf_token
+            else None
+        )
+
+        try:
+            sub_id = asyncio.run(
+                adapter.submit_solution(
+                    slug=problem.slug,
+                    question_id=problem.internal_question_id,
+                    typed_code=latest.source_code,
+                    session_cookie=session_cookie,
+                    csrf_token=csrf_token,
+                )
+            )
+            console.print(f"[green]✔ Submitted successfully! Submission ID: #{sub_id}[/green]")
+            console.print("[cyan]Polling judge verdict...[/cyan]")
+
+            verdict_res = asyncio.run(
+                adapter.poll_submission_verdict(
+                    submission_id=sub_id,
+                    session_cookie=session_cookie,
+                    csrf_token=csrf_token,
+                )
+            )
+
+            repo.update_submission_verdict(
+                session, submission_id=sub_id, verdict=verdict_res.status_msg
+            )
+            if verdict_res.is_accepted:
+                repo.mark_session_accepted(session, submission_id=sub_id)
+                db.commit()
+                console.print(
+                    Panel.fit(
+                        f"[bold green]✔ JUDGE VERDICT: ACCEPTED![/bold green]\n"
+                        f"[bold white]Runtime:[/bold white] {verdict_res.runtime}\n"
+                        f"[bold white]Memory:[/bold white] {verdict_res.memory}\n"
+                        f"[bold white]Testcases Passed:[/bold white] {verdict_res.total_correct}/{verdict_res.total_testcases}",
+                        title="Submission Accepted",
+                        border_style="green",
+                    )
+                )
+            else:
+                db.commit()
+                console.print(
+                    Panel.fit(
+                        f"[bold red]✖ JUDGE VERDICT: {verdict_res.status_msg}[/bold red]\n"
+                        f"[bold white]Testcases Passed:[/bold white] {verdict_res.total_correct}/{verdict_res.total_testcases}\n"
+                        f"[bold white]Last Testcase:[/bold white] {verdict_res.last_testcase or 'N/A'}\n"
+                        f"[bold white]Expected Output:[/bold white] {verdict_res.expected_output or 'N/A'}\n"
+                        f"[bold white]Code Output:[/bold white] {verdict_res.code_output or 'N/A'}",
+                        title="Submission Rejected",
+                        border_style="red",
+                    )
+                )
+        except Exception as e:
+            console.print(f"[bold red]Submission error:[/bold red] {e}")
+            raise typer.Exit(code=1) from e
 
 
 @codeforces_app.command(name="set-statement")

@@ -76,10 +76,40 @@ class PlatformSubmission(BaseModel):
     memory_consumed_bytes: int | None = None
 
 
+class LeetCodeSubmissionResult(BaseModel):
+    """Result of an authenticated submission to LeetCode."""
+
+    submission_id: str
+    state: str  # PENDING, STARTED, SUCCESS, TIMEOUT
+    status_msg: str  # Accepted, Wrong Answer, Time Limit Exceeded, etc.
+    is_accepted: bool = False
+    status_code: int | None = None
+    total_correct: int = 0
+    total_testcases: int = 0
+    runtime: str | None = None
+    memory: str | None = None
+    last_testcase: str | None = None
+    expected_output: str | None = None
+    code_output: str | None = None
+    runtime_error: str | None = None
+    compile_error: str | None = None
+    error_message: str | None = None
+
+
+class CalendarVerificationResult(BaseModel):
+    """Result of querying userProfileCalendar on LeetCode."""
+
+    is_active: bool
+    submission_count: int = 0
+    streak: int = 0
+    total_active_days: int = 0
+    cycle_date: str
+
+
 class ILeetCodeAdapter(Protocol):
     """Protocol defining the interface for LeetCode integrations."""
 
-    async def fetch_daily_challenge(self, target_date: date) -> ProblemMetadata:
+    async def fetch_daily_challenge(self, target_date: date | None = None) -> ProblemMetadata:
         """Fetch the official Daily Coding Challenge for the specified date."""
         ...
 
@@ -87,9 +117,39 @@ class ILeetCodeAdapter(Protocol):
         self,
         username: str,
         problem_slug: str,
-        min_timestamp_unix: int,
+        min_timestamp_unix: int = 0,
     ) -> PlatformSubmission | None:
         """Query public user profile submissions for an accepted verdict."""
+        ...
+
+    async def submit_solution(
+        self,
+        slug: str,
+        question_id: str,
+        typed_code: str,
+        session_cookie: str,
+        csrf_token: str | None = None,
+    ) -> str:
+        """Submit code to LeetCode authenticated endpoint and return submission ID."""
+        ...
+
+    async def poll_submission_verdict(
+        self,
+        submission_id: str,
+        session_cookie: str,
+        csrf_token: str | None = None,
+        max_timeout: float = 30.0,
+        poll_interval: float = 2.0,
+    ) -> LeetCodeSubmissionResult:
+        """Poll LeetCode check endpoint until a terminal judge verdict is received."""
+        ...
+
+    async def verify_calendar_activity(
+        self,
+        username: str,
+        target_date_ist: str,
+    ) -> CalendarVerificationResult:
+        """Verify whether target date in Asia/Kolkata is marked active on LeetCode calendar."""
         ...
 
 

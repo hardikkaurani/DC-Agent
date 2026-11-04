@@ -233,6 +233,65 @@ class Repository:
     ) -> None:
         """Mark a daily session as officially platform Accepted."""
         daily_session.status = "ACCEPTED"
+        daily_session.judge_verdict = "Accepted"
+        if submission_id:
+            daily_session.submission_id = submission_id
+        daily_session.completed_at = datetime.now(UTC)
+        self.session.flush()
+
+    def update_session_status(
+        self,
+        daily_session: DailySession,
+        status: str,
+        error_message: str | None = None,
+        log_entry: str | None = None,
+    ) -> None:
+        """Update session status and append to execution log."""
+        daily_session.status = status
+        if error_message is not None:
+            daily_session.error_message = error_message
+        if log_entry:
+            log_item = {
+                "timestamp": datetime.now(UTC).isoformat(),
+                "status": status,
+                "message": log_entry,
+            }
+            curr_log = list(daily_session.execution_log or [])
+            curr_log.append(log_item)
+            daily_session.execution_log = curr_log
+        self.session.flush()
+
+    def update_submission_verdict(
+        self,
+        daily_session: DailySession,
+        submission_id: str,
+        verdict: str,
+    ) -> None:
+        """Update session and attempt with judge verdict."""
+        daily_session.submission_id = submission_id
+        daily_session.judge_verdict = verdict
+        if daily_session.attempts:
+            latest = daily_session.attempts[-1]
+            latest.platform_submission_id = submission_id
+            latest.platform_verdict = verdict
+        self.session.flush()
+
+    def mark_session_calendar_verified(self, daily_session: DailySession) -> None:
+        """Mark session as verified on LeetCode calendar."""
+        daily_session.status = "CALENDAR_VERIFIED"
+        daily_session.calendar_verified_at = datetime.now(UTC)
+        self.session.flush()
+
+    def mark_session_done(self, daily_session: DailySession) -> None:
+        """Mark session as completely finished and verified."""
+        daily_session.status = "DONE"
+        daily_session.completed_at = datetime.now(UTC)
+        self.session.flush()
+
+    def mark_session_failed(self, daily_session: DailySession, error_msg: str) -> None:
+        """Mark session as failed with descriptive error message."""
+        daily_session.status = "FAILED"
+        daily_session.error_message = error_msg
         daily_session.completed_at = datetime.now(UTC)
         self.session.flush()
 

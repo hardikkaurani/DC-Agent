@@ -1,9 +1,11 @@
 """SQLAlchemy 2.0 declarative database entities for DC-Agent."""
 
 from datetime import datetime
+from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -15,8 +17,33 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.sqlite import JSON
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+
+class SessionStatus(StrEnum):
+    """Lifecycle states for daily sessions."""
+
+    SCHEDULED = "SCHEDULED"
+    RUNNING = "RUNNING"
+    PROBLEM_FETCHED = "PROBLEM_FETCHED"
+    SOLUTION_GENERATED = "SOLUTION_GENERATED"
+    LOCALLY_VERIFIED = "LOCALLY_VERIFIED"
+    SUBMISSION_PENDING = "SUBMISSION_PENDING"
+    SUBMITTED = "SUBMITTED"
+    JUDGE_ACCEPTED = "JUDGE_ACCEPTED"
+    CALENDAR_VERIFIED = "CALENDAR_VERIFIED"
+    DONE = "DONE"
+    FAILED = "FAILED"
+    NEEDS_ATTENTION = "NEEDS_ATTENTION"
+
+    # Legacy / local compatibility statuses
+    INITIALIZED = "INITIALIZED"
+    LOCAL_PASSED = "LOCAL_PASSED"
+    LOCAL_FAILED = "LOCAL_FAILED"
+    ACCEPTED = "ACCEPTED"
+    EXHAUSTED = "EXHAUSTED"
+    STATEMENT_REQUIRED = "STATEMENT_REQUIRED"
+    UNVERIFIED = "UNVERIFIED"
 
 
 class Base(DeclarativeBase):
@@ -101,6 +128,17 @@ class Problem(Base):
     metadata_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), nullable=False)
 
+    @property
+    def internal_question_id(self) -> str:
+        """Return the platform internal questionId required for LeetCode submissions."""
+        if self.metadata_payload and "question" in self.metadata_payload:
+            q = self.metadata_payload["question"]
+            if isinstance(q, dict) and "questionId" in q:
+                return str(q["questionId"])
+        if self.metadata_payload and "questionId" in self.metadata_payload:
+            return str(self.metadata_payload["questionId"])
+        return self.external_id
+
     # Relationships
     test_cases: Mapped[list["LocalTestCase"]] = relationship(
         "LocalTestCase", back_populates="problem", cascade="all, delete-orphan"
@@ -150,6 +188,11 @@ class DailySession(Base):
     status: Mapped[str] = mapped_column(String(32), default="PENDING", nullable=False)
     retry_budget: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
     retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    submission_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    judge_verdict: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    calendar_verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    execution_log: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
     selected_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 

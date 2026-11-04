@@ -47,9 +47,12 @@
   - **Output Truncation**: Caps stdout/stderr at 64KB to prevent buffer bombs.
 - **Pre-Execution AST Sanitizer**: Blocks forbidden imports (`os`, `sys`, `subprocess`, `socket`, `shutil`, `pty`, `pathlib`) and dangerous builtins (`eval`, `exec`, `open`, `compile`, `__import__`).
 
-### 4. Zero-Maintenance Dual Automation
-- **Local APScheduler**: Background daemon scheduled daily at `17:15` (5:15 PM Asia/Kolkata timezone) with SQLite-backed lock state to avoid duplicate execution.
-- **Cloud Cron (GitHub Actions)**: `.github/workflows/daily.yml` executes automatically at `11:45 UTC` (17:15 IST) every day. Runs even if your local laptop is turned off!
+### 4. Laptop-Independent Autonomous Cloud Execution
+- **Autonomous Cloud Scheduler (GitHub Actions)**: `.github/workflows/daily.yml` executes autonomously every day at **5:30 PM Asia/Kolkata** (12:00 UTC). Runs in cloud infrastructure completely independent of your personal laptop (whether sleeping, turned off, or disconnected).
+- **Authenticated LeetCode Submission & Judge Polling**: Submits verified solutions using configured `LEETCODE_SESSION` and `LEETCODE_CSRF_TOKEN`, polls the official judge for terminal verdict, and conducts bounded retries upon Wrong Answer or Time Limit Exceeded.
+- **Green Calendar Verification**: Directly inspects the user profile activity calendar to verify that the canonical date in `Asia/Kolkata` is officially marked active before marking the run `DONE`.
+- **Durable Cloud Persistence**: Full PostgreSQL support (via `psycopg[binary]`) alongside local SQLite WAL mode, preventing state loss across cloud runners.
+- **Local APScheduler Daemon**: Background runner for local environments scheduled daily at `17:30` IST.
 
 ### 5. Localhost Web Dashboard
 - Embedded, responsive single-page dashboard served via FastAPI at `http://127.0.0.1:8000`.
@@ -256,13 +259,61 @@ uv run dc-agent reset --curriculum
 
 ---
 
-## Cloud Automation via GitHub Actions
+## Autonomous Cloud Automation (GitHub Actions)
 
-If your computer is powered off at 5:15 PM IST, the scheduled GitHub Actions workflow runs the daily cycle autonomously:
+DC-Agent executes autonomously in cloud infrastructure every day at **5:30 PM Asia/Kolkata** (12:00 UTC) via `.github/workflows/daily.yml`. It operates completely independent of your personal computer.
 
-1. Navigate to your GitHub repository: `Settings` $\rightarrow$ `Secrets and variables` $\rightarrow$ `Actions`.
-2. Add a repository secret named `GEMINI_API_KEY` containing your Google Gemini API key.
-3. The workflow defined in `.github/workflows/daily.yml` will automatically trigger every day at `11:45 UTC` (`17:15 IST`), execute problem selection, solution generation, and sandboxed test execution, and upload artifacts.
+### Required GitHub Secrets & Setup
+
+Navigate to your GitHub repository: `Settings` $\rightarrow$ `Secrets and variables` $\rightarrow$ `Actions` and configure:
+
+| Secret / Variable | Required | Description |
+|:---|:---:|:---|
+| `GEMINI_API_KEY` | **Yes** | Google Gemini API key for solution generation and diagnostics. |
+| `LEETCODE_SESSION` | **Yes** | Authenticated LeetCode session cookie (`LEETCODE_SESSION`). |
+| `LEETCODE_CSRF_TOKEN` | Optional | LeetCode `csrftoken` (auto-extracted from session if omitted). |
+| `DATABASE_URL` | Recommended | PostgreSQL connection URI (`postgresql://...`) for durable multi-day persistence across cloud runners (e.g. Supabase, Neon, Cloud SQL). Defaults to SQLite if omitted. |
+| `LEETCODE_USERNAME` | Optional | Repository variable for LeetCode profile handle (defaults to `hardikkaurani_`). |
+
+### Strict State Machine Lifecycle
+
+Cloud execution transitions through explicit lifecycle states and enforces that a daily run is only marked `DONE` after both judge acceptance and green calendar confirmation:
+
+```mermaid
+stateDiagram-v2
+    [*] --> SCHEDULED: Cron trigger (5:30 PM IST)
+    SCHEDULED --> RUNNING: Acquire lock & check idempotency
+    RUNNING --> PROBLEM_FETCHED: Fetch official Daily Challenge
+    PROBLEM_FETCHED --> SOLUTION_GENERATED: Gemini reasoning & review
+    SOLUTION_GENERATED --> LOCALLY_VERIFIED: Docker sandbox execution & AST check
+    LOCALLY_VERIFIED --> SUBMISSION_PENDING: Authenticated API handshake
+    SUBMISSION_PENDING --> SUBMITTED: Post solution to LeetCode API
+    SUBMITTED --> JUDGE_ACCEPTED: Poll judge until Accepted verdict
+    JUDGE_ACCEPTED --> CALENDAR_VERIFIED: Verify active date on user profile
+    CALENDAR_VERIFIED --> DONE: Persist report & finalize run
+    DONE --> [*]
+
+    SUBMITTED --> FAILED: Retry budget exhausted (Wrong Answer / TLE)
+    LOCALLY_VERIFIED --> NEEDS_ATTENTION: LEETCODE_SESSION missing
+```
+
+### Manual CLI Execution & Verification
+
+You can trigger or test cloud execution manually at any time:
+
+```bash
+# Test complete pipeline locally in Docker without submitting (Dry Run)
+uv run dc-agent cloud-run --dry-run
+
+# Run autonomous cloud cycle (fetches, solves, tests, submits, verifies)
+uv run dc-agent cloud-run
+
+# Manually submit today's verified solution to LeetCode and poll verdict
+uv run dc-agent leetcode submit-daily
+
+# Verify whether today's date in Asia/Kolkata is active on LeetCode calendar
+uv run dc-agent leetcode verify-calendar
+```
 
 ---
 

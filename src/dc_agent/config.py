@@ -5,7 +5,7 @@ from enum import StrEnum
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -43,16 +43,31 @@ class Settings(BaseSettings):
     ollama_base_url: str = Field(default="http://localhost:11434", alias="OLLAMA_BASE_URL")
     ollama_model: str = Field(default="deepseek-coder:latest", alias="OLLAMA_MODEL")
 
-    # Platform Profiles
+    # Platform Profiles & Authentication
     codeforces_username: str = Field(default="hkvariant", alias="CODEFORCES_USERNAME")
     leetcode_username: str = Field(default="hardikkaurani_", alias="LEETCODE_USERNAME")
+    leetcode_session: SecretStr | None = Field(default=None, alias="LEETCODE_SESSION")
+    leetcode_csrf_token: SecretStr | None = Field(default=None, alias="LEETCODE_CSRF_TOKEN")
 
     # Persistence
     database_url: str = Field(default="sqlite:///dc_agent.db", alias="DATABASE_URL")
 
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def normalize_database_url(cls, v: str) -> str:
+        """Normalize Postgres URLs to use the psycopg driver."""
+        if not isinstance(v, str):
+            return v
+        v = v.strip()
+        if v.startswith("postgres://"):
+            return "postgresql+psycopg://" + v[len("postgres://") :]
+        if v.startswith("postgresql://") and not v.startswith("postgresql+"):
+            return "postgresql+psycopg://" + v[len("postgresql://") :]
+        return v
+
     # Scheduler Settings
     timezone: str = Field(default="Asia/Kolkata", alias="TIMEZONE")
-    daily_run_time: str = Field(default="17:15", alias="DAILY_RUN_TIME")  # 5:15 PM
+    daily_run_time: str = Field(default="17:30", alias="DAILY_RUN_TIME")  # 5:30 PM Asia/Kolkata
     daily_policy: DailyPolicyType = Field(default=DailyPolicyType.ALTERNATING, alias="DAILY_POLICY")
 
     # Sandbox & Resource Limits (Docker is the preferred secure backend)
@@ -73,6 +88,24 @@ class Settings(BaseSettings):
         if not self.gemini_api_key:
             return "<NOT SET>"
         raw = self.gemini_api_key.get_secret_value()
+        if len(raw) <= 8:
+            return "***"
+        return f"{raw[:4]}...{raw[-4:]}"
+
+    def get_masked_leetcode_session(self) -> str:
+        """Return safely masked LeetCode session token."""
+        if not self.leetcode_session:
+            return "<NOT SET>"
+        raw = self.leetcode_session.get_secret_value()
+        if len(raw) <= 8:
+            return "***"
+        return f"{raw[:4]}...{raw[-4:]}"
+
+    def get_masked_leetcode_csrf(self) -> str:
+        """Return safely masked LeetCode CSRF token."""
+        if not self.leetcode_csrf_token:
+            return "<NOT SET>"
+        raw = self.leetcode_csrf_token.get_secret_value()
         if len(raw) <= 8:
             return "***"
         return f"{raw[:4]}...{raw[-4:]}"

@@ -1,28 +1,34 @@
-name: Daily Challenge Workflow (Manual / CI Verification)
-
-# Automatic scheduled cloud execution is disabled because GitHub-hosted runners
-# do not provide hardened Docker container isolation for untrusted AI-generated code.
-# Local execution using Docker is the recommended secure environment:
-#   uv run dc-agent daily
-# Or run the local scheduler daemon:
-#   uv run dc-agent schedule
+name: DC-Agent Autonomous Cloud Execution
 
 on:
+  schedule:
+    # 5:30 PM Asia/Kolkata (IST = UTC+5:30) is 12:00 PM (12:00) UTC
+    - cron: '0 12 * * *'
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Dry run check (validates configuration without executing untrusted code)'
+        description: 'Dry run check (verify locally in Docker without submitting to LeetCode)'
         required: false
-        default: true
+        default: false
         type: boolean
+      force_platform:
+        description: 'Target platform override (default: leetcode)'
+        required: false
+        default: 'leetcode'
+        type: string
+
+concurrency:
+  group: dc-agent-daily
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
-  verify:
-    name: Verify DC-Agent Configuration
+  run-daily:
+    name: Autonomous Daily Challenge Execution
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
@@ -40,17 +46,34 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras --python 3.12
 
-      - name: Validate System Status (Dry Run)
+      - name: Pull Docker Execution Image
+        run: |
+          docker pull python:3.12-slim
+
+      - name: Execute Autonomous Daily Challenge
         env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          LEETCODE_SESSION: ${{ secrets.LEETCODE_SESSION }}
+          LEETCODE_CSRF_TOKEN: ${{ secrets.LEETCODE_CSRF_TOKEN }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL || 'sqlite:///dc_agent.db' }}
+          LEETCODE_USERNAME: ${{ vars.LEETCODE_USERNAME || 'hardikkaurani_' }}
+          CODEFORCES_USERNAME: ${{ vars.CODEFORCES_USERNAME || 'hkvariant' }}
+          TIMEZONE: Asia/Kolkata
+          DAILY_RUN_TIME: "17:30"
           AI_PROVIDER: gemini
           GEMINI_MODEL: gemini-2.5-flash
-          CODEFORCES_USERNAME: hkvariant
-          LEETCODE_USERNAME: hardikkaurani_
-          TIMEZONE: Asia/Kolkata
-          DAILY_RUN_TIME: "17:15"
-          DAILY_POLICY: alternating
           SANDBOX_BACKEND: docker
           ALLOW_INSECURE_FALLBACK: "false"
+          CI: "true"
         run: |
-          echo "Running DC-Agent verification..."
-          uv run dc-agent status
+          uv run dc-agent cloud-run \
+            --dry-run=${{ inputs.dry_run || false }} \
+            --platform=${{ inputs.force_platform || 'leetcode' }}
+
+      - name: Upload Cloud Execution Report Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-execution-report
+          path: reports/cloud/LIVE_CLOUD_E2E_TEST_REPORT.md
+          if-no-files-found: ignore
