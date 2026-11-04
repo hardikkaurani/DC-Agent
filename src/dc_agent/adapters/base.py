@@ -41,8 +41,10 @@ class TestCase(BaseModel):
     __test__ = False
 
     input_data: str
-    expected_output: str
+    expected_output: str | None = None
     is_sample: bool = True
+    is_verified: bool = True
+    description: str | None = None
 
 
 class ProblemMetadata(BaseModel):

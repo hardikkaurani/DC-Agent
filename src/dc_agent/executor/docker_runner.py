@@ -151,14 +151,25 @@ class DockerExecutionSandbox(IExecutionSandbox):
                                 error_msg = f"Process exited with code {exit_code}. Stderr: {stderr_truncated.strip()}"
                         else:
                             actual_output = stdout_truncated
-                            norm_actual = self._normalize_output(actual_output)
-                            norm_expected = self._normalize_output(tc.expected_output)
-
-                            if norm_actual == norm_expected:
-                                verdict = LocalExecutionVerdict.PASS
+                            if (
+                                tc.expected_output is None
+                                or tc.expected_output == ""
+                                or not getattr(tc, "is_verified", True)
+                            ):
+                                verdict = LocalExecutionVerdict.UNVERIFIED
+                                error_msg = (
+                                    "Test executed successfully without errors, "
+                                    "but expected output was missing or unverified."
+                                )
                             else:
-                                verdict = LocalExecutionVerdict.FAIL
-                                error_msg = f"Output mismatch. Expected:\n{tc.expected_output}\nGot:\n{actual_output}"
+                                norm_actual = self._normalize_output(actual_output)
+                                norm_expected = self._normalize_output(tc.expected_output)
+
+                                if norm_actual == norm_expected:
+                                    verdict = LocalExecutionVerdict.PASS
+                                else:
+                                    verdict = LocalExecutionVerdict.FAIL
+                                    error_msg = f"Output mismatch. Expected:\n{tc.expected_output}\nGot:\n{actual_output}"
 
                     except Exception as wait_err:
                         # Timeout
@@ -189,28 +200,52 @@ class DockerExecutionSandbox(IExecutionSandbox):
                         actual_output=actual_output,
                         execution_time_ms=elapsed_ms,
                         error_message=error_msg,
+                        is_verified=bool(getattr(tc, "is_verified", True) and tc.expected_output),
                     )
                 )
 
         passed_count = sum(1 for r in test_results if r.verdict == LocalExecutionVerdict.PASS)
-        overall = (
-            LocalExecutionVerdict.PASS
-            if (passed_count == len(test_cases) and test_cases)
-            else LocalExecutionVerdict.FAIL
+        unverified_count = sum(
+            1 for r in test_results if r.verdict == LocalExecutionVerdict.UNVERIFIED
+        )
+        failed_count = sum(
+            1
+            for r in test_results
+            if r.verdict
+            in (
+                LocalExecutionVerdict.FAIL,
+                LocalExecutionVerdict.RUNTIME_ERROR,
+                LocalExecutionVerdict.TIMEOUT,
+                LocalExecutionVerdict.MEMORY_LIMIT_EXCEEDED,
+                LocalExecutionVerdict.SAFETY_VIOLATION,
+            )
         )
 
-        if any(r.verdict == LocalExecutionVerdict.TIMEOUT for r in test_results):
+        if not test_cases:
+            overall = LocalExecutionVerdict.NO_VERIFIED_TESTS
+        elif any(r.verdict == LocalExecutionVerdict.SAFETY_VIOLATION for r in test_results):
+            overall = LocalExecutionVerdict.SAFETY_VIOLATION
+        elif any(r.verdict == LocalExecutionVerdict.TIMEOUT for r in test_results):
             overall = LocalExecutionVerdict.TIMEOUT
         elif any(r.verdict == LocalExecutionVerdict.MEMORY_LIMIT_EXCEEDED for r in test_results):
             overall = LocalExecutionVerdict.MEMORY_LIMIT_EXCEEDED
         elif any(r.verdict == LocalExecutionVerdict.RUNTIME_ERROR for r in test_results):
             overall = LocalExecutionVerdict.RUNTIME_ERROR
+        elif failed_count > 0:
+            overall = LocalExecutionVerdict.FAIL
+        elif passed_count > 0:
+            overall = LocalExecutionVerdict.PASS
+        elif unverified_count > 0:
+            overall = LocalExecutionVerdict.UNVERIFIED
+        else:
+            overall = LocalExecutionVerdict.NO_VERIFIED_TESTS
 
         return ExecutionSummary(
             overall_verdict=overall,
             total_tests=len(test_cases),
             passed_tests=passed_count,
-            failed_tests=len(test_cases) - passed_count,
+            failed_tests=failed_count,
+            unverified_tests=unverified_count,
             results=test_results,
             total_time_ms=total_time_ms,
             backend_used="docker",

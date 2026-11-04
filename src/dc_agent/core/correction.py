@@ -37,8 +37,16 @@ class CorrectionEngine:
         )
         summary = self.sandbox.run_tests(exec_code, test_cases)
 
-        if summary.overall_verdict == LocalExecutionVerdict.PASS or not test_cases:
-            logger.info("Local tests passed on initial attempt.")
+        if (
+            summary.overall_verdict
+            in (
+                LocalExecutionVerdict.PASS,
+                LocalExecutionVerdict.UNVERIFIED,
+                LocalExecutionVerdict.NO_VERIFIED_TESTS,
+            )
+            or not test_cases
+        ):
+            logger.info("Local test execution completed with verdict: %s.", summary.overall_verdict)
             return current_code, summary, diagnostics
 
         if summary.overall_verdict == LocalExecutionVerdict.SAFETY_VIOLATION:
@@ -56,7 +64,18 @@ class CorrectionEngine:
 
             # Find the first failing test case
             failing_test = next(
-                (r for r in summary.results if r.verdict != LocalExecutionVerdict.PASS), None
+                (
+                    r
+                    for r in summary.results
+                    if r.verdict
+                    in (
+                        LocalExecutionVerdict.FAIL,
+                        LocalExecutionVerdict.RUNTIME_ERROR,
+                        LocalExecutionVerdict.TIMEOUT,
+                        LocalExecutionVerdict.MEMORY_LIMIT_EXCEEDED,
+                    )
+                ),
+                None,
             )
 
             failure_details = {
@@ -87,8 +106,12 @@ class CorrectionEngine:
                 )
                 summary = self.sandbox.run_tests(exec_code, test_cases)
 
-                if summary.overall_verdict == LocalExecutionVerdict.PASS:
-                    logger.info("Tests passed after %d correction iteration(s)!", attempt)
+                if summary.overall_verdict in (
+                    LocalExecutionVerdict.PASS,
+                    LocalExecutionVerdict.UNVERIFIED,
+                    LocalExecutionVerdict.NO_VERIFIED_TESTS,
+                ):
+                    logger.info("Tests succeeded after %d correction iteration(s)!", attempt)
                     return current_code, summary, diagnostics
 
                 if summary.overall_verdict == LocalExecutionVerdict.SAFETY_VIOLATION:

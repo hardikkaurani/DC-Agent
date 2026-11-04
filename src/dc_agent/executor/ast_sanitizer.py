@@ -61,6 +61,7 @@ FORBIDDEN_CALLS: frozenset[str] = frozenset(
         "globals",
         "locals",
         "breakpoint",
+        "open",
     }
 )
 

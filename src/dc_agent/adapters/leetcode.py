@@ -83,12 +83,37 @@ class LeetCodeAdapter(ILeetCodeAdapter):
 
     @staticmethod
     def validate_url(url: str) -> bool:
-        """Validate whether a URL belongs to official LeetCode domains."""
+        """Validate whether a URL belongs to official LeetCode domains and points to a problem."""
         try:
-            parsed = urlparse(url)
-            return parsed.netloc.lower() in ("leetcode.com", "www.leetcode.com", "leetcode.cn")
+            parsed = urlparse(url.strip())
+            if parsed.scheme not in ("http", "https"):
+                return False
+            if parsed.netloc.lower() not in ("leetcode.com", "www.leetcode.com", "leetcode.cn"):
+                return False
+            return bool(re.search(r"^/problems/[a-z0-9-]+", parsed.path.lower()))
         except Exception:
             return False
+
+    @staticmethod
+    def extract_expected_outputs_from_content(content_html: str) -> list[str]:
+        """Attempt to reliably extract example expected outputs from LeetCode problem HTML.
+
+        LeetCode problem statements usually format examples with:
+        <strong>Input:</strong> ...
+        <strong>Output:</strong> &nbsp;...
+        """
+        if not content_html:
+            return []
+
+        pattern = re.compile(
+            r"<strong>Output:</strong>\s*(?:<code>)?\s*([^<\n\r]+)",
+            re.IGNORECASE,
+        )
+        matches = pattern.findall(content_html)
+        cleaned = [
+            re.sub(r"<[^>]+>", "", m).replace("&nbsp;", " ").strip() for m in matches if m.strip()
+        ]
+        return cleaned
 
     @staticmethod
     def get_profile_url(username: str) -> str:
@@ -144,11 +169,29 @@ class LeetCodeAdapter(ILeetCodeAdapter):
                 content = question.get("content", "")
                 examples_raw = question.get("exampleTestcaseList", [])
 
+                extracted_outputs = self.extract_expected_outputs_from_content(content)
+
                 sample_tests: list[TestCase] = []
-                for ex in examples_raw:
-                    sample_tests.append(
-                        TestCase(input_data=str(ex), expected_output="", is_sample=True)
-                    )
+                for idx, ex in enumerate(examples_raw):
+                    if idx < len(extracted_outputs) and extracted_outputs[idx]:
+                        sample_tests.append(
+                            TestCase(
+                                input_data=str(ex),
+                                expected_output=extracted_outputs[idx],
+                                is_sample=True,
+                                is_verified=True,
+                            )
+                        )
+                    else:
+                        sample_tests.append(
+                            TestCase(
+                                input_data=str(ex),
+                                expected_output=None,
+                                is_sample=True,
+                                is_verified=False,
+                                description="Input-only sample without verified expected output",
+                            )
+                        )
 
                 return ProblemMetadata(
                     platform=Platform.LEETCODE,
