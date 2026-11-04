@@ -30,6 +30,20 @@ class SolverService:
         Returns:
             Tuple of (GeneratedSolution, SolutionReview, executable_code)
         """
+        clean_desc = (description or "").strip()
+        placeholder_candidates = (
+            title.strip(),
+            f"{title} on {platform.upper()}",
+            f"{title} on {platform.lower()}",
+            f"{title} on {platform.title()}",
+        )
+        if not clean_desc or clean_desc in placeholder_candidates:
+            raise ValueError(
+                f"Problem statement is unavailable for '{title}' on {platform.upper()}. "
+                "Cannot generate solution without official problem statement and constraints. "
+                "Please provide the problem statement first."
+            )
+
         logger.info(
             "Generating solution with %s (%s)...",
             self.provider.provider_name,
@@ -42,14 +56,14 @@ class SolverService:
                 formatted_tests.append(
                     {
                         "input": tc.input_data,
-                        "expected_output": tc.expected_output,
+                        "expected_output": tc.expected_output or "",
                     }
                 )
 
         # Step 1: Solution Generation
         solution = await self.provider.generate_solution(
             problem_title=title,
-            problem_description=description,
+            problem_description=clean_desc,
             platform=platform,
             constraints=constraints,
             sample_tests=formatted_tests,

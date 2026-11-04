@@ -3,7 +3,7 @@
 import asyncio
 import os
 import shutil
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
 import typer
@@ -16,13 +16,14 @@ from rich.table import Table
 from dc_agent.adapters.base import TestCase
 from dc_agent.adapters.codeforces import CodeforcesAdapter
 from dc_agent.adapters.leetcode import LeetCodeAdapter
-from dc_agent.config import get_settings
+from dc_agent.config import get_canonical_cycle_date, get_settings
 from dc_agent.core.orchestrator import DailyOrchestrator
 from dc_agent.curriculum.engine import CurriculumEngine
 from dc_agent.curriculum.models import TIER_BOUNDS, CurriculumTier, ProgressionState
 from dc_agent.db.models import DailySession
 from dc_agent.db.repository import Repository
 from dc_agent.db.session import get_db, init_db
+from dc_agent.executor.base import LocalExecutionVerdict
 from dc_agent.executor.sandbox import Sandbox
 from dc_agent.providers.factory import get_ai_provider
 from dc_agent.scheduler.service import SchedulerService
@@ -81,11 +82,52 @@ def config() -> None:
     table.add_row("Daily Policy", settings.daily_policy)
     table.add_row("Scheduled Run Time", f"{settings.daily_run_time} ({settings.timezone})")
     table.add_row("Sandbox Backend", settings.sandbox_backend)
+    table.add_row("Allow Insecure Fallback", str(settings.allow_insecure_fallback))
     table.add_row("Execution Timeout", f"{settings.execution_timeout}s")
     table.add_row("Memory Limit", f"{settings.memory_limit_mb} MB")
     table.add_row("Database URL", settings.database_url)
 
     console.print(table)
+
+
+@app.command()
+def status() -> None:
+    """Display current system status and sandbox security capabilities."""
+    settings = get_settings()
+    cycle_date = get_canonical_cycle_date(settings)
+
+    sandbox = Sandbox(settings=settings)
+    caps = sandbox.get_security_capabilities()
+
+    with get_db() as db:
+        repo = Repository(db)
+        session = repo.get_daily_session_for_date(cycle_date)
+        prog = repo.get_curriculum_progress(settings.codeforces_username)
+
+        console.print(
+            Panel.fit(
+                f"[bold white]Canonical Cycle Date (IST):[/bold white] [cyan]{cycle_date}[/cyan]\n"
+                f"[bold white]Active Daily Session:[/bold white] "
+                f"{session.problem.title + ' (' + session.platform.upper() + ') - ' + session.status if session else '[dim]None initialized yet[/dim]'}\n"
+                f"[bold white]Codeforces Rating Target:[/bold white] {prog.current_rating_target} (Tier {prog.current_tier})\n"
+                f"[bold white]Consecutive Solved / Failed:[/bold white] {prog.consecutive_accepted}/3 AC | {prog.consecutive_failed}/2 Fails",
+                title="Daily Session & Curriculum Status",
+                border_style="cyan",
+            )
+        )
+
+        console.print(
+            Panel.fit(
+                f"[bold white]Active Backend:[/bold white] {caps['active_backend'].upper()}\n"
+                f"[bold white]Configured Backend:[/bold white] {caps['configured_backend']}\n"
+                f"[bold white]Docker Daemon Reachable:[/bold white] {'[green]Yes[/green]' if caps['docker_available'] else '[yellow]No[/yellow]'}\n"
+                f"[bold white]Insecure Fallback Allowed:[/bold white] {'[yellow]Yes[/yellow]' if caps['allow_insecure_fallback'] else '[green]No (Strict)[/green]'}\n"
+                f"[bold white]Memory Limit:[/bold white] {caps['memory_limit_mb']} MB | [bold white]Timeout:[/bold white] {caps['timeout_seconds']}s\n\n"
+                f"[bold white]Isolation Guarantee:[/bold white]\n{caps['isolation_summary']}",
+                title="Sandbox Security & Capability",
+                border_style="magenta",
+            )
+        )
 
 
 @app.command()
@@ -158,202 +200,11 @@ def doctor() -> None:
     else:
         console.print(f"[red]✘ Workspace Directory:[/red] Cannot write to {settings.workspace_dir}")
 
-    console.print(f"\n[bold]{checks_passed}/{total_checks} Checks Passed.[/bold]")
+    console.print(f"\n[bold]Doctor Results:[/bold] {checks_passed}/{total_checks} checks passed.")
 
 
 @app.command()
-def status() -> None:
-    """Display today's problem, rating progress, and retry budget."""
-    settings = get_settings()
-    cycle_date = datetime.now(UTC).strftime("%Y-%m-%d")
-
-    with get_db() as db:
-        repo = Repository(db)
-        lc_session = repo.get_daily_session("leetcode", cycle_date)
-        cf_session = repo.get_daily_session("codeforces", cycle_date)
-        session = lc_session or cf_session
-
-        prog = repo.get_curriculum_progress(settings.codeforces_username)
-
-        # Status Table
-        table = Table(title=f"DC-Agent Status :: {cycle_date}", border_style="cyan")
-        table.add_column("Field", style="bold white")
-        table.add_column("Value", style="green")
-
-        if session:
-            table.add_row("Today's Platform", session.platform.upper())
-            table.add_row("Today's Problem", session.problem.title)
-            table.add_row("Problem URL", session.problem.url)
-            table.add_row("Session Status", session.status)
-            table.add_row("Attempts Made", f"{session.retry_count}/{session.retry_budget}")
-        else:
-            table.add_row("Today's Session", "Not yet started. Run: dc-agent daily")
-
-        tier_enum = CurriculumTier(prog.current_tier)
-        low, high = TIER_BOUNDS[tier_enum]
-        table.add_row(
-            "Codeforces Tier", f"Tier {prog.current_tier} ({tier_enum.name}) [{low}–{high}]"
-        )
-        table.add_row("Target Rating", str(prog.current_rating_target))
-        table.add_row("Consecutive Solved", f"{prog.consecutive_accepted}/3 toward promotion")
-
-        console.print(table)
-
-
-@app.command()
-def daily(
-    platform: str = typer.Option(
-        None,
-        "--platform",
-        "-p",
-        help="Override platform for today: 'leetcode' or 'codeforces'",
-    ),
-) -> None:
-    """Start or resume today's challenge."""
-    if platform:
-        p_norm = platform.lower().strip()
-        if p_norm not in ("leetcode", "codeforces"):
-            console.print(
-                f"[red]Error:[/red] Unsupported platform '{platform}'. "
-                "Choose 'leetcode' or 'codeforces'."
-            )
-            raise typer.Exit(code=1)
-
-    console.print("[bold cyan]🚀 Starting Daily Competitive Programming Challenge...[/bold cyan]\n")
-    orchestrator = DailyOrchestrator()
-
-    try:
-        res = asyncio.run(orchestrator.run_daily(force_platform=platform))
-        status_val = res.get("status")
-
-        color = "green" if status_val in ("LOCAL_PASSED", "ACCEPTED") else "yellow"
-        console.print(
-            Panel.fit(
-                f"[{color}]Status: {status_val}[/{color}]\n"
-                f"[bold white]Platform:[/bold white] {res.get('platform', '').upper()}\n"
-                f"[bold white]Problem:[/bold white] {res.get('problem_title')}\n"
-                f"[bold white]URL:[/bold white] {res.get('problem_url')}\n"
-                f"[bold white]Workspace:[/bold white] {res.get('workspace_dir')}\n"
-                f"[bold white]Local Tests Passed:[/bold white] {res.get('tests_passed')}/{res.get('total_tests')}\n"
-                f"[bold white]AI Corrections Applied:[/bold white] {res.get('corrections', 0)}\n\n"
-                f"[dim]Next step: Review code in workspace and submit on platform web interface.[/dim]",
-                title="Daily Session Summary",
-            )
-        )
-    except Exception as e:
-        console.print(f"[red]Error executing daily challenge:[/red] {e}")
-        raise typer.Exit(code=1) from e
-
-
-@app.command()
-def today() -> None:
-    """View today's problem and generated solution code."""
-    get_settings()
-    cycle_date = datetime.now(UTC).strftime("%Y-%m-%d")
-
-    with get_db() as db:
-        repo = Repository(db)
-        session = repo.get_daily_session("leetcode", cycle_date) or repo.get_daily_session(
-            "codeforces", cycle_date
-        )
-
-        if not session:
-            console.print(
-                f"[yellow]No session active for {cycle_date}. Run 'dc-agent daily' to begin.[/yellow]"
-            )
-            return
-
-        latest_attempt = session.attempts[-1] if session.attempts else None
-
-        console.print(
-            f"[bold cyan]Today's Problem:[/bold cyan] {session.problem.title} ({session.platform.upper()})"
-        )
-        console.print(f"[bold cyan]URL:[/bold cyan] {session.problem.url}")
-        console.print(f"[bold cyan]Status:[/bold cyan] {session.status}\n")
-
-        if latest_attempt:
-            syntax = Syntax(
-                latest_attempt.source_code, "python", theme="monokai", line_numbers=True
-            )
-            console.print(syntax)
-        else:
-            console.print("[yellow]No solution attempts recorded yet.[/yellow]")
-
-
-@leetcode_app.command(name="set-daily")
-def leetcode_set_daily(
-    url: str = typer.Option(None, "--url", "-u", help="Official LeetCode problem URL"),
-    slug: str = typer.Option(None, "--slug", "-s", help="LeetCode problem slug"),
-) -> None:
-    """Set or confirm the official LeetCode Daily Challenge URL or slug."""
-    if not url and not slug:
-        url = typer.prompt("Enter official LeetCode Daily Challenge URL")
-
-    adapter = LeetCodeAdapter()
-    problem_slug = adapter.normalize_slug(url or slug or "")
-
-    if not problem_slug:
-        console.print("[red]Invalid problem URL or slug provided.[/red]")
-        raise typer.Exit(code=1)
-
-    problem_url = adapter.get_problem_url(problem_slug)
-    cycle_date = datetime.now(UTC).strftime("%Y-%m-%d")
-
-    with get_db() as db:
-        repo = Repository(db)
-        problem = repo.create_or_get_problem(
-            platform="leetcode",
-            external_id=problem_slug,
-            title=problem_slug.replace("-", " ").title(),
-            slug=problem_slug,
-            url=problem_url,
-            difficulty_label="Medium",
-        )
-        settings = get_settings()
-        session = repo.get_daily_session("leetcode", cycle_date)
-        if not session:
-            session = repo.create_daily_session(
-                platform="leetcode",
-                handle=settings.leetcode_username,
-                cycle_date=cycle_date,
-                problem=problem,
-            )
-        else:
-            session.problem_id = problem.id
-
-    console.print(f"[green]✔ LeetCode Daily Challenge successfully set to:[/green] {problem_url}")
-    console.print(
-        "[dim]Run 'dc-agent solve' or 'dc-agent daily --platform leetcode' to proceed.[/dim]"
-    )
-
-
-@codeforces_app.command(name="profile")
-def codeforces_profile() -> None:
-    """Fetch and display official Codeforces user profile information."""
-    settings = get_settings()
-    cf = CodeforcesAdapter()
-    try:
-        info = asyncio.run(cf.fetch_user_info(settings.codeforces_username))
-        table = Table(
-            title=f"Codeforces Profile :: {settings.codeforces_username}", border_style="cyan"
-        )
-        table.add_column("Property", style="bold white")
-        table.add_column("Value", style="green")
-
-        table.add_row("Handle", info.get("handle", ""))
-        table.add_row("Rating", str(info.get("rating", "Unrated")))
-        table.add_row("Max Rating", str(info.get("maxRating", "Unrated")))
-        table.add_row("Rank", str(info.get("rank", "Unrated")))
-        table.add_row("Max Rank", str(info.get("maxRank", "Unrated")))
-        table.add_row("Contribution", str(info.get("contribution", 0)))
-
-        console.print(table)
-    except Exception as e:
-        console.print(f"[red]Error fetching Codeforces profile:[/red] {e}")
-
-
-@codeforces_app.command(name="progress")
-def codeforces_progress() -> None:
+def curriculum() -> None:
     """Display Codeforces curriculum tiers and current progression state."""
     settings = get_settings()
     with get_db() as db:
@@ -386,16 +237,332 @@ def codeforces_progress() -> None:
 
 
 @app.command()
-def test() -> None:
-    """Execute local sandbox tests against the current solution."""
+def daily(
+    platform: str = typer.Option(
+        None,
+        "--platform",
+        "-p",
+        help="Override platform for today: 'leetcode' or 'codeforces'",
+    ),
+    allow_insecure_fallback: bool = typer.Option(
+        False,
+        "--allow-insecure-fallback",
+        help="Allow fallback to subprocess runner if Docker is unavailable",
+    ),
+) -> None:
+    """Start or resume today's challenge."""
     settings = get_settings()
-    cycle_date = datetime.now(UTC).strftime("%Y-%m-%d")
+    if allow_insecure_fallback:
+        settings.allow_insecure_fallback = True
+
+    if platform:
+        p_norm = platform.lower().strip()
+        if p_norm not in ("leetcode", "codeforces"):
+            console.print(
+                f"[red]Error:[/red] Unsupported platform '{platform}'. "
+                "Choose 'leetcode' or 'codeforces'."
+            )
+            raise typer.Exit(code=1)
+
+    console.print("[bold cyan]🚀 Starting Daily Competitive Programming Challenge...[/bold cyan]\n")
+    orchestrator = DailyOrchestrator(settings=settings)
+
+    try:
+        res = asyncio.run(orchestrator.run_daily(force_platform=platform))
+        status_val = res.get("status")
+
+        if status_val == "STATEMENT_REQUIRED":
+            console.print(
+                Panel.fit(
+                    f"[bold yellow]Problem Statement Required![/bold yellow]\n\n"
+                    f"[bold white]Problem:[/bold white] {res.get('problem_title')}\n"
+                    f"[bold white]Official URL:[/bold white] {res.get('problem_url')}\n"
+                    f"[bold white]Workspace:[/bold white] {res.get('workspace_dir')}\n\n"
+                    f"[dim]{res.get('message')}[/dim]",
+                    title="Action Required",
+                    border_style="yellow",
+                )
+            )
+            return
+
+        color = "green" if status_val in ("LOCAL_PASSED", "ACCEPTED") else "yellow"
+        unverified_text = (
+            f" ({res.get('unverified_tests', 0)} unverified)" if res.get("unverified_tests") else ""
+        )
+        console.print(
+            Panel.fit(
+                f"[{color}]Status: {status_val}[/{color}]\n"
+                f"[bold white]Platform:[/bold white] {res.get('platform', '').upper()}\n"
+                f"[bold white]Problem:[/bold white] {res.get('problem_title')}\n"
+                f"[bold white]URL:[/bold white] {res.get('problem_url')}\n"
+                f"[bold white]Workspace:[/bold white] {res.get('workspace_dir')}\n"
+                f"[bold white]Local Tests Passed:[/bold white] {res.get('tests_passed')}/{res.get('total_tests')}{unverified_text}\n"
+                f"[bold white]AI Corrections Applied:[/bold white] {res.get('corrections', 0)}\n\n"
+                f"[dim]Next step: Review code in workspace and submit on platform web interface.[/dim]",
+                title="Daily Session Summary",
+            )
+        )
+    except Exception as e:
+        console.print(f"[red]Error executing daily challenge:[/red] {e}")
+        raise typer.Exit(code=1) from e
+
+
+@app.command()
+def today() -> None:
+    """View today's problem and generated solution code."""
+    settings = get_settings()
+    cycle_date = get_canonical_cycle_date(settings)
 
     with get_db() as db:
         repo = Repository(db)
-        session = repo.get_daily_session("leetcode", cycle_date) or repo.get_daily_session(
-            "codeforces", cycle_date
+        session = repo.get_daily_session_for_date(cycle_date)
+
+        if not session:
+            console.print(
+                f"[yellow]No session active for {cycle_date}. Run 'dc-agent daily' to begin.[/yellow]"
+            )
+            return
+
+        latest_attempt = session.attempts[-1] if session.attempts else None
+
+        console.print(
+            f"[bold cyan]Today's Problem:[/bold cyan] {session.problem.title} ({session.platform.upper()})"
         )
+        console.print(f"[bold cyan]URL:[/bold cyan] {session.problem.url}")
+        console.print(f"[bold cyan]Status:[/bold cyan] {session.status}\n")
+
+        if latest_attempt:
+            syntax = Syntax(
+                latest_attempt.source_code, "python", theme="monokai", line_numbers=True
+            )
+            console.print(syntax)
+        else:
+            console.print("[yellow]No solution attempts recorded yet.[/yellow]")
+
+
+@leetcode_app.command(name="open-profile")
+def leetcode_open_profile() -> None:
+    """Open official LeetCode user profile in default web browser."""
+    import webbrowser
+
+    settings = get_settings()
+    url = LeetCodeAdapter.get_profile_url(settings.leetcode_username)
+    console.print(f"[cyan]Opening LeetCode profile in browser:[/cyan] {url}")
+    webbrowser.open(url)
+
+
+@leetcode_app.command(name="set-daily")
+def leetcode_set_daily(
+    url: str = typer.Option(None, "--url", "-u", help="Official LeetCode problem URL"),
+    slug: str = typer.Option(None, "--slug", "-s", help="LeetCode problem slug"),
+) -> None:
+    """Set or confirm the official LeetCode Daily Challenge URL or slug."""
+    if not url and not slug:
+        url = typer.prompt("Enter official LeetCode Daily Challenge URL")
+
+    adapter = LeetCodeAdapter()
+    if url and not adapter.validate_url(url):
+        console.print(
+            f"[red]Error:[/red] Invalid LeetCode URL '{url}'. Must belong to leetcode.com/problems/<slug>/"
+        )
+        raise typer.Exit(code=1)
+
+    problem_slug = adapter.normalize_slug(url or slug or "")
+
+    if not problem_slug:
+        console.print("[red]Invalid problem URL or slug provided.[/red]")
+        raise typer.Exit(code=1)
+
+    problem_url = adapter.get_problem_url(problem_slug)
+    settings = get_settings()
+    cycle_date = get_canonical_cycle_date(settings)
+
+    with get_db() as db:
+        repo = Repository(db)
+        problem = repo.create_or_get_problem(
+            platform="leetcode",
+            external_id=problem_slug,
+            title=problem_slug.replace("-", " ").title(),
+            slug=problem_slug,
+            url=problem_url,
+            difficulty_label="Medium",
+        )
+        session = repo.get_daily_session_for_date(cycle_date)
+        if not session:
+            session = repo.create_daily_session(
+                platform="leetcode",
+                handle=settings.leetcode_username,
+                cycle_date=cycle_date,
+                problem=problem,
+            )
+        else:
+            session.problem_id = problem.id
+            session.platform = "leetcode"
+        db.commit()
+
+    console.print(f"[green]✔ LeetCode Daily Challenge successfully set to:[/green] {problem_url}")
+    console.print(
+        "[dim]Run 'dc-agent solve' or 'dc-agent daily --platform leetcode' to proceed.[/dim]"
+    )
+
+
+@codeforces_app.command(name="set-statement")
+def codeforces_set_statement(
+    statement: str = typer.Option(None, "--statement", "-s", help="Problem statement text"),
+    file: Path = typer.Option(
+        None, "--file", "-f", help="Path to text or markdown file containing statement"
+    ),
+    sample_input: str = typer.Option(None, "--input", "-i", help="Sample input"),
+    sample_output: str = typer.Option(None, "--output", "-o", help="Sample expected output"),
+    session_id: int = typer.Option(None, "--session-id", help="Target session ID"),
+) -> None:
+    """Supply the official problem statement and test cases for Codeforces."""
+    settings = get_settings()
+    cycle_date = get_canonical_cycle_date(settings)
+
+    content = ""
+    if file:
+        if not file.exists():
+            console.print(f"[red]Error:[/red] File not found: {file}")
+            raise typer.Exit(code=1)
+        content = file.read_text(encoding="utf-8").strip()
+    elif statement:
+        content = statement.strip()
+    else:
+        content = typer.prompt("Enter problem statement")
+
+    if not content:
+        console.print("[red]Error:[/red] Problem statement cannot be empty.")
+        raise typer.Exit(code=1)
+
+    with get_db() as db:
+        repo = Repository(db)
+        session: DailySession | None = None
+        if session_id:
+            session = db.get(DailySession, session_id)
+        else:
+            session = repo.get_daily_session_for_date(cycle_date)
+
+        if not session or not session.problem:
+            console.print(
+                "[yellow]No active daily session found. Run 'dc-agent daily' first to select a problem.[/yellow]"
+            )
+            raise typer.Exit(code=1)
+
+        test_cases = []
+        if sample_input and sample_output:
+            test_cases.append(
+                {
+                    "input_data": sample_input,
+                    "expected_output": sample_output,
+                    "is_sample": True,
+                    "is_verified": True,
+                    "source": "USER_INPUT",
+                }
+            )
+
+        repo.set_problem_statement(session.problem, description=content, test_cases=test_cases)
+        if session.status == "STATEMENT_REQUIRED":
+            session.status = "INITIALIZED"
+        db.commit()
+
+        console.print(f"[green]✔ Problem statement updated for:[/green] {session.problem.title}")
+        if test_cases:
+            console.print(f"[green]✔ Added {len(test_cases)} sample test case(s).[/green]")
+        console.print("[dim]You can now run 'dc-agent daily' or 'dc-agent solve' to proceed.[/dim]")
+
+
+@app.command(name="add-test")
+def add_test(
+    input_data: str = typer.Option(..., "--input", "-i", help="Test case input"),
+    expected_output: str = typer.Option(..., "--output", "-o", help="Verified expected output"),
+    session_id: int = typer.Option(None, "--session-id", "-s", help="Target session ID"),
+) -> None:
+    """Add a verified test case with expected output to the active problem."""
+    settings = get_settings()
+    cycle_date = get_canonical_cycle_date(settings)
+
+    with get_db() as db:
+        repo = Repository(db)
+        session: DailySession | None = None
+        if session_id:
+            session = db.get(DailySession, session_id)
+        else:
+            session = repo.get_daily_session_for_date(cycle_date)
+
+        if not session or not session.problem:
+            console.print("[yellow]No active session found. Run 'dc-agent daily' first.[/yellow]")
+            raise typer.Exit(code=1)
+
+        repo.set_problem_statement(
+            session.problem,
+            description=session.problem.description or session.problem.title,
+            test_cases=[
+                {
+                    "input_data": input_data,
+                    "expected_output": expected_output,
+                    "is_sample": True,
+                    "is_verified": True,
+                    "source": "USER_INPUT",
+                }
+            ],
+        )
+        db.commit()
+
+        console.print(
+            f"[green]✔ Verified test case added to problem:[/green] {session.problem.title}"
+        )
+
+
+@codeforces_app.command(name="profile")
+def codeforces_profile() -> None:
+    """Fetch and display official Codeforces user profile information."""
+    settings = get_settings()
+    cf = CodeforcesAdapter()
+    try:
+        info = asyncio.run(cf.fetch_user_info(settings.codeforces_username))
+        table = Table(
+            title=f"Codeforces Profile :: {settings.codeforces_username}", border_style="cyan"
+        )
+        table.add_column("Property", style="bold white")
+        table.add_column("Value", style="green")
+
+        table.add_row("Handle", info.get("handle", ""))
+        table.add_row("Rating", str(info.get("rating", "Unrated")))
+        table.add_row("Max Rating", str(info.get("maxRating", "Unrated")))
+        table.add_row("Rank", str(info.get("rank", "Unrated")))
+        table.add_row("Max Rank", str(info.get("maxRank", "Unrated")))
+        table.add_row("Contribution", str(info.get("contribution", 0)))
+
+        console.print(table)
+    except Exception as e:
+        console.print(f"[red]Error fetching Codeforces profile:[/red] {e}")
+
+
+@codeforces_app.command(name="progress")
+def codeforces_progress() -> None:
+    """Display Codeforces curriculum tiers and current progression state."""
+    curriculum()
+
+
+@app.command()
+def test(
+    allow_insecure_fallback: bool = typer.Option(
+        False,
+        "--allow-insecure-fallback",
+        help="Allow fallback to subprocess runner if Docker is unavailable",
+    ),
+) -> None:
+    """Execute local sandbox tests against the current solution."""
+    settings = get_settings()
+    if allow_insecure_fallback:
+        settings.allow_insecure_fallback = True
+
+    cycle_date = get_canonical_cycle_date(settings)
+
+    with get_db() as db:
+        repo = Repository(db)
+        session = repo.get_daily_session_for_date(cycle_date)
 
         if not session or not session.attempts:
             console.print(
@@ -406,23 +573,36 @@ def test() -> None:
         latest = session.attempts[-1]
         sandbox = Sandbox(settings=settings)
         test_cases = [
-            TestCase(input_data=tc.input_data, expected_output=tc.expected_output)
+            TestCase(
+                input_data=tc.input_data,
+                expected_output=tc.expected_output,
+                is_verified=tc.is_verified,
+            )
             for tc in session.problem.test_cases
         ]
 
         summary = sandbox.run_tests(latest.source_code, test_cases)
+        color = "green" if summary.overall_verdict == LocalExecutionVerdict.PASS else "yellow"
         console.print(
-            f"[bold cyan]Local Test Results ({summary.backend_used}):[/bold cyan] {summary.overall_verdict}"
+            f"[bold cyan]Local Test Results ({summary.backend_used}):[/bold cyan] [{color}]{summary.overall_verdict}[/{color}]"
         )
         console.print(
-            f"Passed: {summary.passed_tests}/{summary.total_tests} (Time: {summary.total_time_ms:.1f}ms)\n"
+            f"Passed: {summary.passed_tests}/{summary.total_tests} | Unverified: {summary.unverified_tests} (Time: {summary.total_time_ms:.1f}ms)\n"
         )
 
         for r in summary.results:
-            icon = "✔" if r.verdict == "PASS" else "✘"
-            color = "green" if r.verdict == "PASS" else "red"
+            if r.verdict == LocalExecutionVerdict.PASS:
+                icon = "✔"
+                color_name = "green"
+            elif r.verdict == LocalExecutionVerdict.UNVERIFIED:
+                icon = "ℹ"
+                color_name = "yellow"
+            else:
+                icon = "✘"
+                color_name = "red"
+
             console.print(
-                f"[{color}]{icon} Test #{r.test_index}: {r.verdict}[/{color}] ({r.execution_time_ms:.1f}ms)"
+                f"[{color_name}]{icon} Test #{r.test_index}: {r.verdict}[/{color_name}] ({r.execution_time_ms:.1f}ms)"
             )
             if r.error_message:
                 console.print(f"   [dim]{r.error_message}[/dim]")
@@ -442,10 +622,9 @@ def record_verdict(
         if session_id:
             session = db.get(DailySession, session_id)
         else:
-            cycle_date = datetime.now(UTC).strftime("%Y-%m-%d")
-            session = repo.get_daily_session("leetcode", cycle_date) or repo.get_daily_session(
-                "codeforces", cycle_date
-            )
+            settings = get_settings()
+            cycle_date = get_canonical_cycle_date(settings)
+            session = repo.get_daily_session_for_date(cycle_date)
 
         if not session:
             console.print("[red]No active session found to record verdict for.[/red]")
@@ -481,6 +660,7 @@ def record_verdict(
                     )
         else:
             session.status = "REJECTED"
+            db.commit()
             console.print(f"[yellow]Recorded verdict {v_norm} for session #{session.id}.[/yellow]")
 
 
@@ -488,13 +668,11 @@ def record_verdict(
 def verify() -> None:
     """Poll official platform APIs to verify whether manual submission was Accepted."""
     settings = get_settings()
-    cycle_date = datetime.now(UTC).strftime("%Y-%m-%d")
+    cycle_date = get_canonical_cycle_date(settings)
 
     with get_db() as db:
         repo = Repository(db)
-        session = repo.get_daily_session("leetcode", cycle_date) or repo.get_daily_session(
-            "codeforces", cycle_date
-        )
+        session = repo.get_daily_session_for_date(cycle_date)
 
         if not session:
             console.print("[yellow]No active session today to verify.[/yellow]")
@@ -505,7 +683,6 @@ def verify() -> None:
                 f"[cyan]Querying Codeforces API for {settings.codeforces_username} submissions...[/cyan]"
             )
             cf = CodeforcesAdapter()
-            # Extract contest and index
             parts = session.problem.external_id.split("_")
             if len(parts) == 2 and parts[0].isdigit():
                 contest_id = int(parts[0])
@@ -515,6 +692,7 @@ def verify() -> None:
                 )
                 if sub:
                     repo.mark_session_accepted(session, submission_id=sub.submission_id)
+                    db.commit()
                     console.print(
                         f"[bold green]✔ Verified Accepted on Codeforces! (Submission #{sub.submission_id})[/bold green]"
                     )
@@ -533,6 +711,7 @@ def verify() -> None:
             )
             if sub:
                 repo.mark_session_accepted(session, submission_id=sub.submission_id)
+                db.commit()
                 console.print(
                     f"[bold green]✔ Verified Accepted on LeetCode! (Slug: {sub.problem_identifier})[/bold green]"
                 )
@@ -540,6 +719,45 @@ def verify() -> None:
             console.print(
                 "[yellow]No Accepted submission detected yet on LeetCode public profile. You can record it manually with 'dc-agent record-verdict -v ACCEPTED'.[/yellow]"
             )
+
+
+@app.command()
+def submit() -> None:
+    """Open the problem page in the default browser and copy solution to system clipboard."""
+    import webbrowser
+
+    settings = get_settings()
+    cycle_date = get_canonical_cycle_date(settings)
+
+    with get_db() as db:
+        repo = Repository(db)
+        session = repo.get_daily_session_for_date(cycle_date)
+
+        if not session:
+            console.print("[yellow]No active challenge session found for today.[/yellow]")
+            return
+
+        latest_attempt = session.attempts[-1] if session.attempts else None
+        if latest_attempt:
+            # Try to copy to clipboard
+            try:
+                import pyperclip  # type: ignore[import-untyped]
+
+                pyperclip.copy(latest_attempt.source_code)
+                console.print("[green]✔ Solution code copied to clipboard![/green]")
+            except Exception:
+                console.print(
+                    "[yellow]Clipboard utility not available. Solution is in problem workspace.[/yellow]"
+                )
+
+        console.print(f"[cyan]Opening submission page in browser:[/cyan] {session.problem.url}")
+        webbrowser.open(session.problem.url)
+        console.print(
+            "\n[dim]Instructions:\n"
+            "1. Paste code on the platform submission tab.\n"
+            "2. Submit and wait for platform judgment.\n"
+            "3. Run 'dc-agent verify' or 'dc-agent record-verdict -v ACCEPTED' to record confirmation.[/dim]"
+        )
 
 
 @app.command()

@@ -32,14 +32,14 @@ def test_cli_doctor() -> None:
         result = runner.invoke(app, ["doctor"])
         assert result.exit_code == 0
         assert "Database Connection" in result.stdout
-        assert "Checks Passed" in result.stdout
+        assert "checks passed" in result.stdout.lower()
 
 
 def test_cli_status_and_today() -> None:
     """Ensure status and today commands display session info."""
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0
-    assert "DC-Agent Status" in result.stdout
+    assert "Status" in result.stdout
 
     res_today = runner.invoke(app, ["today"])
     assert res_today.exit_code == 0

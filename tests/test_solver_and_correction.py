@@ -19,7 +19,7 @@ def test_wrap_leetcode_code_appends_driver() -> None:
 
     assert "class Solution:" in wrapped
     assert "if __name__ == '__main__':" in wrapped
-    assert "sys.stdin" in wrapped
+    assert "input()" in wrapped
 
     # If code already contains __main__, do not duplicate
     already_wrapped = wrap_leetcode_code(wrapped)

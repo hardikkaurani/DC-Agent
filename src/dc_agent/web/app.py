@@ -1,12 +1,11 @@
 """Lightweight localhost FastAPI dashboard for DC-Agent."""
 
-from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
-from dc_agent.config import get_settings
+from dc_agent.config import get_canonical_cycle_date, get_settings
 from dc_agent.curriculum.models import TIER_BOUNDS, CurriculumTier
 from dc_agent.db.repository import Repository
 from dc_agent.db.session import get_db
@@ -48,15 +47,12 @@ async def get_system_status() -> dict[str, Any]:
 @app.get("/api/today")
 def get_today_session() -> dict[str, Any]:
     """Return today's active challenge session and latest solution."""
-    get_settings()
-    cycle_date = datetime.now(UTC).strftime("%Y-%m-%d")
+    settings = get_settings()
+    cycle_date = get_canonical_cycle_date(settings)
 
     with get_db() as db:
         repo = Repository(db)
-        # Check leetcode and codeforces
-        lc_session = repo.get_daily_session("leetcode", cycle_date)
-        cf_session = repo.get_daily_session("codeforces", cycle_date)
-        session = lc_session or cf_session
+        session = repo.get_daily_session_for_date(cycle_date)
 
         if not session:
             return {
