@@ -2,20 +2,25 @@
 
 import hashlib
 import logging
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from dc_agent.adapters.base import ProblemMetadata, TestCase
 from dc_agent.adapters.codeforces import CodeforcesAdapter
 from dc_agent.adapters.leetcode import LeetCodeAdapter
-from dc_agent.config import DailyPolicyType, Settings, get_settings
+from dc_agent.config import (
+    DailyPolicyType,
+    Settings,
+    get_canonical_cycle_date,
+    get_settings,
+)
 from dc_agent.core.correction import CorrectionEngine
 from dc_agent.core.solver import SolverService
 from dc_agent.curriculum.engine import CurriculumEngine
 from dc_agent.db.models import Problem
 from dc_agent.db.repository import Repository
 from dc_agent.db.session import get_db, init_db
+from dc_agent.executor.base import LocalExecutionVerdict
 from dc_agent.executor.sandbox import Sandbox
 from dc_agent.providers.factory import get_ai_provider
 
@@ -34,8 +39,13 @@ class DailyOrchestrator:
         self.solver = SolverService(provider=self.ai_provider)
         self.correction_engine = CorrectionEngine(provider=self.ai_provider, sandbox=self.sandbox)
 
-    def determine_today_platform(self, cycle_date: str) -> str:
-        """Determine target platform based on configured policy and calendar date."""
+    def determine_today_platform(
+        self, cycle_date: str | None = None, repo: Repository | None = None
+    ) -> str:
+        """Determine target platform based on configured policy, existing sessions, and history.
+
+        Replaces flawed day-of-year parity with persistent history alternation.
+        """
         policy = self.settings.daily_policy
 
         if policy == DailyPolicyType.LEETCODE_ONLY:
@@ -43,10 +53,30 @@ class DailyOrchestrator:
         if policy == DailyPolicyType.CODEFORCES_ONLY:
             return "codeforces"
 
-        # Alternating policy: day of year % 2
-        dt = datetime.strptime(cycle_date, "%Y-%m-%d")
-        day_of_year = dt.timetuple().tm_yday
-        return "leetcode" if (day_of_year % 2 != 0) else "codeforces"
+        c_date = cycle_date or get_canonical_cycle_date(self.settings)
+
+        if repo is not None:
+            # 1. If today already has an initialized or recorded session, lock to that platform
+            today_session = repo.get_daily_session_for_date(c_date)
+            if today_session:
+                return today_session.platform
+
+            # 2. Otherwise alternate based on the most recent completed or recorded session
+            last_session = repo.get_latest_daily_session()
+            if last_session:
+                return "codeforces" if last_session.platform == "leetcode" else "leetcode"
+        else:
+            with get_db() as db:
+                r = Repository(db)
+                today_session = r.get_daily_session_for_date(c_date)
+                if today_session:
+                    return today_session.platform
+                last_session = r.get_latest_daily_session()
+                if last_session:
+                    return "codeforces" if last_session.platform == "leetcode" else "leetcode"
+
+        # Default initial platform for a fresh installation
+        return "leetcode"
 
     def scaffold_workspace(
         self,
@@ -76,7 +106,7 @@ class DailyOrchestrator:
 ## Instructions
 1. Review generated solution in `solution.py`.
 2. Submit code manually at {problem.url}.
-3. Record verdict with `dc-agent record-verdict --session-id <id>` or verify with `dc-agent verify`.
+3. Record verdict with `dc-agent record-verdict --session-id <id>` or verify with `dc-agent verify-verdict`.
 """
         readme_file.write_text(readme_content, encoding="utf-8")
 
@@ -86,66 +116,123 @@ class DailyOrchestrator:
             tests_dir.mkdir(exist_ok=True)
             for idx, tc in enumerate(test_cases, start=1):
                 (tests_dir / f"input_{idx}.txt").write_text(tc.input_data, encoding="utf-8")
-                (tests_dir / f"expected_{idx}.txt").write_text(tc.expected_output, encoding="utf-8")
+                exp_text = tc.expected_output if tc.expected_output is not None else ""
+                (tests_dir / f"expected_{idx}.txt").write_text(exp_text, encoding="utf-8")
 
         return target_dir
 
     async def run_daily(self, force_platform: str | None = None) -> dict[str, Any]:
         """Execute or resume the daily challenge workflow."""
         init_db(self.settings.database_url)
-        cycle_date = datetime.now(UTC).strftime("%Y-%m-%d")
-        platform = (force_platform or self.determine_today_platform(cycle_date)).lower()
+        cycle_date = get_canonical_cycle_date(self.settings)
 
         with get_db() as db:
             repo = Repository(db)
 
-            # Check for existing session on this calendar day (Idempotency)
-            existing_session = repo.get_daily_session(platform, cycle_date)
+            # Check for existing session on this calendar day (Idempotency & Single Daily Policy)
+            existing_session = repo.get_daily_session_for_date(cycle_date)
+            problem: Problem
+
             if existing_session:
                 logger.info(
-                    "Existing daily session found for %s on %s (Status: %s).",
-                    platform,
-                    cycle_date,
+                    "Resuming existing daily session (ID: %d, Platform: %s, Status: %s) for date %s.",
+                    existing_session.id,
+                    existing_session.platform,
                     existing_session.status,
+                    cycle_date,
                 )
-                if existing_session.status in ("ACCEPTED", "EXHAUSTED"):
+                session = existing_session
+                platform = existing_session.platform
+                problem = existing_session.problem
+
+                # Check concurrency: prevent overlapping CLI executions
+                if session.status == "RUNNING":
+                    raise RuntimeError(
+                        f"Daily session for {cycle_date} is currently running in another process. "
+                        "Concurrent runs are prevented to avoid duplicate attempts."
+                    )
+
+                if session.status in ("ACCEPTED", "EXHAUSTED"):
                     return {
-                        "status": existing_session.status,
-                        "session_id": existing_session.id,
+                        "status": session.status,
+                        "session_id": session.id,
                         "platform": platform,
                         "date": cycle_date,
-                        "problem_title": existing_session.problem.title,
-                        "problem_url": existing_session.problem.url,
+                        "problem_title": problem.title,
+                        "problem_url": problem.url,
                         "resumed": True,
+                        "already_completed": True,
                     }
 
-            # Select or fetch the problem
-            problem_meta: ProblemMetadata
-            if platform == "codeforces":
-                problem_meta = await self._select_codeforces_problem(repo)
+                # If session already passed local tests, do not regenerate unnecessarily
+                if session.status == "LOCAL_PASSED" and session.attempts:
+                    latest_att = session.attempts[-1]
+                    ws_dir = self.scaffold_workspace(
+                        platform=platform,
+                        cycle_date=cycle_date,
+                        problem=problem,
+                        code=latest_att.source_code,
+                        test_cases=[
+                            TestCase(
+                                input_data=t.input_data,
+                                expected_output=t.expected_output,
+                                is_verified=t.is_verified,
+                            )
+                            for t in problem.test_cases
+                        ],
+                    )
+                    return {
+                        "status": "LOCAL_PASSED",
+                        "session_id": session.id,
+                        "platform": platform,
+                        "date": cycle_date,
+                        "problem_title": problem.title,
+                        "problem_url": problem.url,
+                        "solution_file": str(ws_dir / "solution.py"),
+                        "workspace_dir": str(ws_dir),
+                        "resumed": True,
+                        "already_passed": True,
+                        "tests_passed": latest_att.execution_metrics.get("passed_tests", 0),
+                        "total_tests": latest_att.execution_metrics.get("total_tests", 0),
+                    }
+
             else:
-                problem_meta = await self._select_leetcode_problem()
+                # No existing session for today: determine platform and select target problem
+                platform = (
+                    force_platform
+                    or self.determine_today_platform(cycle_date=cycle_date, repo=repo)
+                ).lower()
+                problem_meta: ProblemMetadata
 
-            # Persist problem and test cases
-            test_case_dicts = [
-                {"input_data": tc.input_data, "expected_output": tc.expected_output}
-                for tc in problem_meta.sample_test_cases
-            ]
-            problem = repo.create_or_get_problem(
-                platform=platform,
-                external_id=problem_meta.external_id,
-                title=problem_meta.title,
-                slug=problem_meta.slug,
-                url=problem_meta.url,
-                difficulty_label=problem_meta.difficulty_label,
-                numeric_rating=problem_meta.numeric_rating,
-                tags=problem_meta.tags,
-                metadata_payload=problem_meta.metadata_payload,
-                test_cases=test_case_dicts,
-            )
+                if platform == "codeforces":
+                    problem_meta = await self._select_codeforces_problem(repo, cycle_date)
+                else:
+                    problem_meta = await self._select_leetcode_problem()
 
-            # Create session if not existing
-            if not existing_session:
+                test_case_dicts = [
+                    {
+                        "input_data": tc.input_data,
+                        "expected_output": tc.expected_output,
+                        "is_sample": tc.is_sample,
+                        "is_verified": tc.is_verified,
+                    }
+                    for tc in problem_meta.sample_test_cases
+                ]
+
+                problem = repo.create_or_get_problem(
+                    platform=platform,
+                    external_id=problem_meta.external_id,
+                    title=problem_meta.title,
+                    slug=problem_meta.slug,
+                    url=problem_meta.url,
+                    difficulty_label=problem_meta.difficulty_label,
+                    numeric_rating=problem_meta.numeric_rating,
+                    description=problem_meta.raw_content,
+                    tags=problem_meta.tags,
+                    metadata_payload=problem_meta.metadata_payload,
+                    test_cases=test_case_dicts,
+                )
+
                 handle = (
                     self.settings.codeforces_username
                     if platform == "codeforces"
@@ -158,17 +245,66 @@ class DailyOrchestrator:
                     problem=problem,
                     retry_budget=self.settings.retry_limit,
                 )
-            else:
-                session = existing_session
 
-            # Generate and review solution
-            desc = problem_meta.raw_content or f"{problem.title} on {platform.upper()}"
-            sol, review, initial_code = await self.solver.solve_problem(
-                platform=platform,
-                title=problem.title,
-                description=desc,
-                sample_tests=problem_meta.sample_test_cases,
+            # Check if problem statement is available before calling AI
+            desc = (problem.description or "").strip()
+            placeholder_names = (
+                problem.title.strip(),
+                f"{problem.title} on {platform.upper()}",
+                f"{problem.title} on {platform.lower()}",
             )
+            if not desc or desc in placeholder_names:
+                session.status = "STATEMENT_REQUIRED"
+                db.commit()
+                ws_dir = self.scaffold_workspace(
+                    platform=platform,
+                    cycle_date=cycle_date,
+                    problem=problem,
+                    code="# Problem statement required before AI solution generation.\n# Provide statement with: dc-agent codeforces set-statement\n",
+                    test_cases=[],
+                )
+                return {
+                    "status": "STATEMENT_REQUIRED",
+                    "session_id": session.id,
+                    "platform": platform,
+                    "date": cycle_date,
+                    "problem_title": problem.title,
+                    "problem_url": problem.url,
+                    "workspace_dir": str(ws_dir),
+                    "message": (
+                        f"Official {platform.upper()} API provides metadata only. "
+                        f"Please provide the problem statement for '{problem.title}' before generating solutions:\n"
+                        f"Run: dc-agent codeforces set-statement --statement '<text>' (or --file <path>)"
+                    ),
+                }
+
+            # Set concurrency lock
+            session.status = "RUNNING"
+            db.commit()
+
+            test_cases = [
+                TestCase(
+                    input_data=tc.input_data,
+                    expected_output=tc.expected_output,
+                    is_verified=tc.is_verified,
+                )
+                for tc in problem.test_cases
+            ]
+
+            initial_code: str
+            review_info: dict[str, Any] = {}
+
+            # Restore existing attempt code if available; otherwise generate
+            if session.attempts:
+                initial_code = session.attempts[-1].source_code
+            else:
+                sol, review, initial_code = await self.solver.solve_problem(
+                    platform=platform,
+                    title=problem.title,
+                    description=desc,
+                    sample_tests=test_cases,
+                )
+                review_info = review.model_dump()
 
             # Run sandbox tests with iterative correction loop
             final_code, summary, diagnostics = await self.correction_engine.run_and_correct_loop(
@@ -176,7 +312,7 @@ class DailyOrchestrator:
                 title=problem.title,
                 description=desc,
                 initial_code=initial_code,
-                test_cases=problem_meta.sample_test_cases,
+                test_cases=test_cases,
                 max_retries=self.settings.retry_limit,
             )
 
@@ -189,15 +325,20 @@ class DailyOrchestrator:
                     "total_time_ms": summary.total_time_ms,
                     "passed_tests": summary.passed_tests,
                     "total_tests": summary.total_tests,
+                    "unverified_tests": summary.unverified_tests,
                     "corrections_made": len(diagnostics),
                 },
                 platform_verdict="PENDING_MANUAL",
             )
 
-            if summary.overall_verdict == "PASS" or not problem_meta.sample_test_cases:
+            if summary.overall_verdict == LocalExecutionVerdict.PASS and summary.passed_tests > 0:
                 session.status = "LOCAL_PASSED"
+            elif summary.overall_verdict == LocalExecutionVerdict.UNVERIFIED:
+                session.status = "UNVERIFIED"
             else:
                 session.status = "LOCAL_FAILED"
+
+            db.commit()
 
             # Scaffold local workspace
             ws_dir = self.scaffold_workspace(
@@ -205,7 +346,7 @@ class DailyOrchestrator:
                 cycle_date=cycle_date,
                 problem=problem,
                 code=final_code,
-                test_cases=problem_meta.sample_test_cases,
+                test_cases=test_cases,
             )
 
             return {
@@ -217,13 +358,16 @@ class DailyOrchestrator:
                 "problem_url": problem.url,
                 "solution_file": str(ws_dir / "solution.py"),
                 "workspace_dir": str(ws_dir),
-                "review": review.model_dump(),
+                "review": review_info,
                 "tests_passed": summary.passed_tests,
                 "total_tests": summary.total_tests,
+                "unverified_tests": summary.unverified_tests,
                 "corrections": len(diagnostics),
             }
 
-    async def _select_codeforces_problem(self, repo: Repository) -> ProblemMetadata:
+    async def _select_codeforces_problem(
+        self, repo: Repository, cycle_date: str
+    ) -> ProblemMetadata:
         """Select a Codeforces problem matching current curriculum tier excluding solved problems."""
         handle = self.settings.codeforces_username
         progress = repo.get_curriculum_progress(handle)
@@ -248,8 +392,7 @@ class DailyOrchestrator:
                 f"No eligible Codeforces candidates found for rating {progress.current_rating_target}."
             )
 
-        # Deterministic stable daily selection via hash
-        cycle_date = datetime.now(UTC).strftime("%Y-%m-%d")
+        # Deterministic stable daily selection via hash of canonical cycle_date and target rating
         seed = int(
             hashlib.md5(f"{cycle_date}_{progress.current_rating_target}".encode()).hexdigest(), 16
         )

@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     Float,
@@ -95,6 +96,7 @@ class Problem(Base):
     url: Mapped[str] = mapped_column(String(512), nullable=False)
     difficulty_label: Mapped[str] = mapped_column(String(32), nullable=False)
     numeric_rating: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     tags: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     metadata_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), nullable=False)
@@ -117,8 +119,9 @@ class LocalTestCase(Base):
     )
     test_index: Mapped[int] = mapped_column(Integer, nullable=False)
     input_data: Mapped[str] = mapped_column(Text, nullable=False)
-    expected_output: Mapped[str] = mapped_column(Text, nullable=False)
+    expected_output: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     is_sample: Mapped[bool] = mapped_column(default=True, nullable=False)
+    is_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     source: Mapped[str] = mapped_column(String(32), default="PLATFORM_API", nullable=False)
 
     # Relationships
@@ -132,11 +135,12 @@ TestExecution = LocalTestCase
 class DailySession(Base):
     """Represents a daily problem-solving challenge session.
 
-    Enforces strict daily idempotency via UNIQUE(platform, cycle_date).
+    Enforces strict daily idempotency via UNIQUE(cycle_date) to guarantee
+    one target problem per local calendar day.
     """
 
     __tablename__ = "daily_session"
-    __table_args__ = (UniqueConstraint("platform", "cycle_date", name="uq_session_platform_date"),)
+    __table_args__ = (UniqueConstraint("cycle_date", name="uq_session_cycle_date"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     platform: Mapped[str] = mapped_column(String(32), nullable=False)

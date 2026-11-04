@@ -68,9 +68,27 @@ class Repository:
         return prog
 
     def get_daily_session(self, platform: str, cycle_date: str) -> DailySession | None:
-        """Retrieve existing daily session for a platform on a specific UTC date."""
+        """Retrieve existing daily session for a platform on a specific date."""
         stmt = select(DailySession).where(
             DailySession.platform == platform, DailySession.cycle_date == cycle_date
+        )
+        return self.session.scalar(stmt)
+
+    def get_daily_session_for_date(self, cycle_date: str) -> DailySession | None:
+        """Retrieve existing daily session for any platform on a specific local cycle date."""
+        stmt = (
+            select(DailySession)
+            .where(DailySession.cycle_date == cycle_date)
+            .order_by(desc(DailySession.id))
+        )
+        return self.session.scalar(stmt)
+
+    def get_latest_daily_session(self) -> DailySession | None:
+        """Retrieve the most recent daily session in historical order."""
+        stmt = (
+            select(DailySession)
+            .order_by(desc(DailySession.cycle_date), desc(DailySession.id))
+            .limit(1)
         )
         return self.session.scalar(stmt)
 
@@ -84,8 +102,9 @@ class Repository:
         difficulty_label: str,
         numeric_rating: int | None = None,
         tags: list[str] | None = None,
+        description: str | None = None,
         metadata_payload: dict[str, Any] | None = None,
-        test_cases: list[dict[str, str]] | None = None,
+        test_cases: list[dict[str, Any]] | None = None,
     ) -> Problem:
         """Persist problem and associated sample test cases."""
         stmt = select(Problem).where(
@@ -102,6 +121,7 @@ class Repository:
                 url=url,
                 difficulty_label=difficulty_label,
                 numeric_rating=numeric_rating,
+                description=description,
                 tags=tags or [],
                 metadata_payload=metadata_payload or {},
             )
@@ -110,18 +130,52 @@ class Repository:
 
             if test_cases:
                 for idx, tc in enumerate(test_cases, start=1):
+                    exp = tc.get("expected_output")
+                    is_ver = bool(tc.get("is_verified", bool(exp)))
                     test_obj = LocalTestCase(
                         problem_id=problem.id,
                         test_index=idx,
                         input_data=tc.get("input_data", ""),
-                        expected_output=tc.get("expected_output", ""),
-                        is_sample=True,
-                        source="PLATFORM_API",
+                        expected_output=exp,
+                        is_sample=tc.get("is_sample", True),
+                        is_verified=is_ver,
+                        source=tc.get("source", "PLATFORM_API"),
                     )
                     self.session.add(test_obj)
                 self.session.flush()
+        else:
+            # Update description if it was previously missing and is now provided
+            if description and not problem.description:
+                problem.description = description
+                self.session.flush()
 
         return problem
+
+    def set_problem_statement(
+        self,
+        problem: Problem,
+        description: str,
+        test_cases: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Update problem description and optionally append verified test cases."""
+        problem.description = description
+        if test_cases:
+            start_idx = len(problem.test_cases) + 1
+            for offset, tc in enumerate(test_cases):
+                exp = tc.get("expected_output")
+                is_ver = bool(tc.get("is_verified", bool(exp)))
+                test_obj = LocalTestCase(
+                    problem_id=problem.id,
+                    test_index=start_idx + offset,
+                    input_data=tc.get("input_data", ""),
+                    expected_output=exp,
+                    is_sample=tc.get("is_sample", True),
+                    is_verified=is_ver,
+                    source=tc.get("source", "USER_INPUT"),
+                )
+                problem.test_cases.append(test_obj)
+                self.session.add(test_obj)
+        self.session.flush()
 
     def create_daily_session(
         self,
