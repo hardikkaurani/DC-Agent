@@ -333,3 +333,21 @@ async def test_cloud_runner_missing_session_cookie_sets_needs_attention(
 
     assert result["status"] == SessionStatus.NEEDS_ATTENTION
     assert "LEETCODE_SESSION" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_cloud_runner_production_blocks_ephemeral_sqlite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure production cloud execution in CI fails if DATABASE_URL is ephemeral SQLite."""
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.setenv("DATABASE_URL", "sqlite:///test.db")
+    settings = Settings()
+    runner = CloudRunner(settings=settings)
+
+    with pytest.raises(ValueError, match="ephemeral SQLite"):
+        runner.validate_cloud_environment(dry_run=False)
+
+    # In dry-run mode, it should not raise, only warn
+    warnings = runner.validate_cloud_environment(dry_run=True)
+    assert any("ephemeral" in w for w in warnings)

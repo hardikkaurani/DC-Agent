@@ -57,11 +57,17 @@ class CloudRunner:
         warnings: list[str] = []
 
         is_ci = os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true"
-        if is_ci and self.settings.database_url.startswith("sqlite"):
+        if is_ci and not dry_run and self.settings.database_url.startswith("sqlite"):
+            raise ValueError(
+                "DATABASE_URL (PostgreSQL) is missing or set to ephemeral SQLite. "
+                "Production cloud execution requires a durable database connection "
+                "(e.g. PostgreSQL: postgresql://...) to guarantee persistent state "
+                "across runner instances. Ephemeral SQLite fallback in production cloud execution is blocked."
+            )
+        elif is_ci and self.settings.database_url.startswith("sqlite"):
             warnings.append(
-                "Running in CI/Cloud with default SQLite database. "
-                "Sessions and progress will be ephemeral across runner instances. "
-                "Configure PostgreSQL (DATABASE_URL=postgresql://...) for durable persistence."
+                "Running in CI/Cloud dry-run with default SQLite database. "
+                "Sessions and progress will be ephemeral across runner instances."
             )
 
         if not self.settings.gemini_api_key and self.settings.ai_provider == "gemini":
