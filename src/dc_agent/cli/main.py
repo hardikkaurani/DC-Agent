@@ -325,7 +325,7 @@ def daily(
 def cloud_run(
     dry_run: bool = typer.Option(
         False,
-        "--dry-run",
+        "--dry-run/--no-dry-run",
         help="Validate execution pipeline and local Docker tests without submitting to LeetCode",
     ),
     platform: str = typer.Option(

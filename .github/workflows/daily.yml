@@ -66,9 +66,12 @@ jobs:
           ALLOW_INSECURE_FALLBACK: "false"
           CI: "true"
         run: |
-          uv run dc-agent cloud-run \
-            --dry-run=${{ inputs.dry_run || false }} \
-            --platform=${{ inputs.force_platform || 'leetcode' }}
+          ARGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="--dry-run"
+          fi
+          PLATFORM="${{ inputs.force_platform || 'leetcode' }}"
+          uv run dc-agent cloud-run $ARGS --platform "$PLATFORM"
 
       - name: Upload Cloud Execution Report Artifact
         if: always()

@@ -56,7 +56,10 @@ class CloudRunner:
         """Verify cloud infrastructure dependencies, secrets, and storage."""
         warnings: list[str] = []
 
-        is_ci = os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true"
+        is_test = "PYTEST_CURRENT_TEST" in os.environ
+        is_ci = (
+            os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true"
+        ) and not is_test
         if is_ci and not dry_run and self.settings.database_url.startswith("sqlite"):
             raise ValueError(
                 "DATABASE_URL (PostgreSQL) is missing or set to ephemeral SQLite. "

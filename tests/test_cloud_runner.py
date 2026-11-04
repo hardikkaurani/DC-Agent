@@ -341,6 +341,7 @@ async def test_cloud_runner_production_blocks_ephemeral_sqlite(
 ) -> None:
     """Ensure production cloud execution in CI fails if DATABASE_URL is ephemeral SQLite."""
     monkeypatch.setenv("CI", "true")
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.setenv("DATABASE_URL", "sqlite:///test.db")
     settings = Settings()
     runner = CloudRunner(settings=settings)
