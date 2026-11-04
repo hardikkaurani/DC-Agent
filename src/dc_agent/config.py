@@ -1,7 +1,9 @@
 """Configuration settings for DC-Agent."""
 
+from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -53,10 +55,11 @@ class Settings(BaseSettings):
     daily_run_time: str = Field(default="17:15", alias="DAILY_RUN_TIME")  # 5:15 PM
     daily_policy: DailyPolicyType = Field(default=DailyPolicyType.ALTERNATING, alias="DAILY_POLICY")
 
-    # Sandbox & Resource Limits
+    # Sandbox & Resource Limits (Docker is the preferred secure backend)
     sandbox_backend: SandboxBackendType = Field(
-        default=SandboxBackendType.SUBPROCESS, alias="SANDBOX_BACKEND"
+        default=SandboxBackendType.DOCKER, alias="SANDBOX_BACKEND"
     )
+    allow_insecure_fallback: bool = Field(default=False, alias="ALLOW_INSECURE_FALLBACK")
     docker_image: str = Field(default="python:3.12-slim", alias="DOCKER_IMAGE")
     retry_limit: int = Field(default=5, alias="RETRY_LIMIT")
     execution_timeout: float = Field(default=2.0, alias="EXECUTION_TIMEOUT")
@@ -73,6 +76,21 @@ class Settings(BaseSettings):
         if len(raw) <= 8:
             return "***"
         return f"{raw[:4]}...{raw[-4:]}"
+
+
+def get_canonical_cycle_date(
+    settings: Settings | None = None, now_dt: datetime | None = None
+) -> str:
+    """Return the current local cycle date string (YYYY-MM-DD) in canonical Asia/Kolkata timezone."""
+    cfg = settings or get_settings()
+    tz = ZoneInfo(cfg.timezone)
+    if now_dt is None:
+        dt = datetime.now(tz)
+    elif now_dt.tzinfo is None:
+        dt = now_dt.replace(tzinfo=tz)
+    else:
+        dt = now_dt.astimezone(tz)
+    return dt.strftime("%Y-%m-%d")
 
 
 # Global cached settings instance
