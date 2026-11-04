@@ -1,22 +1,27 @@
-name: Daily Challenge Automation
+name: Daily Challenge Workflow (Manual / CI Verification)
+
+# Automatic scheduled cloud execution is disabled because GitHub-hosted runners
+# do not provide hardened Docker container isolation for untrusted AI-generated code.
+# Local execution using Docker is the recommended secure environment:
+#   uv run dc-agent daily
+# Or run the local scheduler daemon:
+#   uv run dc-agent schedule
 
 on:
-  schedule:
-    # 11:45 UTC = 17:15 IST (5:15 PM Asia/Kolkata) daily
-    - cron: '45 11 * * *'
   workflow_dispatch:
     inputs:
-      platform:
-        description: 'Target platform override (leetcode or codeforces)'
+      dry_run:
+        description: 'Dry run check (validates configuration without executing untrusted code)'
         required: false
-        default: ''
+        default: 'true'
+        type: boolean
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  run-daily:
-    name: Execute Daily Challenge
+  verify:
+    name: Verify DC-Agent Configuration
     runs-on: ubuntu-latest
 
     steps:
@@ -35,9 +40,8 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras --python 3.12
 
-      - name: Execute Daily Challenge
+      - name: Validate System Status (Dry Run)
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           AI_PROVIDER: gemini
           GEMINI_MODEL: gemini-2.5-flash
           CODEFORCES_USERNAME: hkvariant
@@ -45,31 +49,8 @@ jobs:
           TIMEZONE: Asia/Kolkata
           DAILY_RUN_TIME: "17:15"
           DAILY_POLICY: alternating
-          SANDBOX_BACKEND: subprocess
+          SANDBOX_BACKEND: docker
+          ALLOW_INSECURE_FALLBACK: "false"
         run: |
-          if [ -n "${{ github.event.inputs.platform }}" ]; then
-            uv run dc-agent daily --platform "${{ github.event.inputs.platform }}"
-          else
-            uv run dc-agent daily
-          fi
-
-      - name: Upload Daily Problem Workspace Artifact
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: daily-problem-workspace
-          path: problem_workspace/
-          retention-days: 30
-
-      - name: Commit Generated Solutions to Repository
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add problem_workspace/ dc_agent.db || true
-          if git diff --staged --quiet; then
-            echo "No new changes to commit."
-          else
-            git commit -m "chore(daily): automated daily challenge solution [skip ci]"
-            git push
-          fi
-
+          echo "Running DC-Agent verification..."
+          uv run dc-agent status
