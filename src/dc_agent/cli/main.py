@@ -3,8 +3,19 @@
 import asyncio
 import os
 import shutil
+import sys
 from datetime import datetime
 from pathlib import Path
+
+# Ensure UTF-8 output encoding across legacy Windows consoles
+if sys.platform == "win32":
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 import typer
 import uvicorn

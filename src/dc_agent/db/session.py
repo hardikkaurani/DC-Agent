@@ -41,6 +41,7 @@ def get_engine(database_url: str | None = None) -> Engine:
                 cursor.close()
 
         _SessionFactory = sessionmaker(bind=_engine, expire_on_commit=False)
+        Base.metadata.create_all(bind=_engine)
 
     return _engine
 
